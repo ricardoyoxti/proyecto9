@@ -1,173 +1,150 @@
-name: 🚀 Deploy Odoo 18 to Google Cloud
+#!/bin/bash
+PROJECT_ID=$(gcloud config get-value project)
+VM_NAME="odoo18-$(date +%Y%m%d-%H%M%S)"
+ZONE="southamerica-east1-a"  # São Paulo
 
-on:
-  repository_dispatch:
-    types: [deploy-odoo]
-  workflow_dispatch:  # ✅ Permite ejecución manual
-    inputs:
-      instance_name:
-        description: 'Nombre base para la instancia'
-        required: false
-        default: 'odoo'
-      machine_type:
-        description: 'Tipo de máquina'
-        required: false
-        default: 'e2-medium'
-        type: choice
-        options:
-        - e2-micro
-        - e2-small
-        - e2-medium
-        - e2-standard-2
-        - e2-standard-4
-      zone:
-        description: 'Zona de GCP'
-        required: false
-        default: 'southamerica-west1-a'
-        type: choice
-        options:
-        - southamerica-west1-a
-        - southamerica-east1-a
-        - us-central1-a
-        - us-east1-a
-        - europe-west1-a
-      disk_size:
-        description: 'Tamaño del disco en GB'
-        required: false
-        default: '20'
-        type: choice
-        options:
-        - '20'
-        - '30'
-        - '50'
-        - '100'
-      wait_for_installation:
-        description: 'Esperar hasta que la instalación complete'
-        required: false
-        default: true
-        type: boolean
+cat > /tmp/startup-odoo18-final.sh << 'STARTUP_SCRIPT'
+#!/bin/bash
+exec > /var/log/startup-script.log 2>&1
+set -e
 
-env:
-  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-  GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+echo "🚀 Instalando Odoo 18 - Versión Final..."
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30  # Timeout más largo para la instalación completa
-    
-    steps:
-    - name: 📥 Checkout code
-      uses: actions/checkout@v4
+# Sistema
+apt-get update -qq
+apt-get install -y postgresql postgresql-contrib git python3-pip python3-dev python3-venv \
+python3-wheel build-essential wget nano libxml2-dev libxslt1-dev libldap2-dev \
+libsasl2-dev libtiff5-dev libjpeg8-dev libopenjp2-7-dev zlib1g-dev libfreetype6-dev \
+liblcms2-dev libwebp-dev libharfbuzz-dev libfribidi-dev libxcb1-dev libpq-dev \
+libssl-dev libffi-dev python3-cffi libzip-dev gcc
 
-    - name: 🔐 Authenticate to Google Cloud
-      uses: google-github-actions/auth@v1
-      with:
-        credentials_json: ${{ secrets.GCP_SA_KEY }}
+# wkhtmltopdf
+cd /tmp
+wget -q https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-2/wkhtmltox_0.12.6.1-2.jammy_amd64.deb
+dpkg -i wkhtmltox_0.12.6.1-2.jammy_amd64.deb || apt-get install -f -y
+rm wkhtmltox_0.12.6.1-2.jammy_amd64.deb
 
-    - name: ☁️ Set up Cloud SDK
-      uses: google-github-actions/setup-gcloud@v1
+# PostgreSQL y usuario
+systemctl start postgresql
+adduser --system --home=/opt/odoo --group odoo
+sudo -u postgres createuser -s odoo 2>/dev/null || true
+sudo -u postgres createdb -O odoo odoo
 
-    - name: 🏷️ Generate instance name
-      id: generate_name
-      run: |
-        # Obtener parámetros desde diferentes fuentes
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          BASE_NAME="${{ github.event.inputs.instance_name || 'odoo' }}"
-        else
-          BASE_NAME="${{ github.event.client_payload.instance_name || 'odoo' }}"
-        fi
-        
-        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-        INSTANCE_NAME="${BASE_NAME}-${TIMESTAMP}"
-        
-        # Validar nombre de instancia (solo letras minúsculas, números y guiones)
-        if [[ ! $INSTANCE_NAME =~ ^[a-z0-9-]+$ ]]; then
-          echo "❌ Error: El nombre de la instancia solo puede contener letras minúsculas, números y guiones"
-          exit 1
-        fi
-        
-        echo "INSTANCE_NAME=$INSTANCE_NAME" >> $GITHUB_OUTPUT
-        echo "BASE_NAME=$BASE_NAME" >> $GITHUB_OUTPUT
-        echo "🏗️ Nombre de instancia generado: $INSTANCE_NAME"
+# Odoo
+git clone --depth 1 --branch 18.0 https://github.com/odoo/odoo /opt/odoo
+chown -R odoo:odoo /opt/odoo
 
-    - name: 🖥️ Create VM Instance
-      run: |
-        INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
-        
-        # Obtener parámetros según el tipo de evento
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          MACHINE_TYPE="${{ github.event.inputs.machine_type || 'e2-medium' }}"
-          ZONE="${{ github.event.inputs.zone || 'southamerica-west1-a' }}"
-          DISK_SIZE="${{ github.event.inputs.disk_size || '20' }}"
-        else
-          MACHINE_TYPE="${{ github.event.client_payload.machine_type || 'e2-medium' }}"
-          ZONE="${{ github.event.client_payload.zone || 'southamerica-west1-a' }}"
-          DISK_SIZE="${{ github.event.client_payload.disk_size || '20' }}"
-        fi
-        
-        echo "🏗️ Creando instancia: $INSTANCE_NAME"
-        echo "🖥️ Tipo de máquina: $MACHINE_TYPE"
-        echo "🌍 Zona: $ZONE"
-        echo "💾 Tamaño del disco: ${DISK_SIZE}GB"
-        
-        gcloud compute instances create $INSTANCE_NAME \
-          --project=${{ env.PROJECT_ID }} \
-          --zone=$ZONE \
-          --machine-type=$MACHINE_TYPE \
-          --network-interface=network-tier=PREMIUM,stack-type=IPV4_ONLY,subnet=default \
-          --maintenance-policy=MIGRATE \
-          --provisioning-model=STANDARD \
-          --service-account=${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }} \
-          --scopes=https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write,https://www.googleapis.com/auth/servicecontrol,https://www.googleapis.com/auth/service.management.readonly,https://www.googleapis.com/auth/trace.append \
-          --tags=odoo-server,http-server,https-server \
-          --image-family=ubuntu-2204-lts \
-          --image-project=ubuntu-os-cloud \
-          --boot-disk-size=$DISK_SIZE \
-          --boot-disk-type=pd-balanced \
-          --boot-disk-device-name=$INSTANCE_NAME \
-          --no-shielded-secure-boot \
-          --shielded-vtpm \
-          --shielded-integrity-monitoring \
-          --labels=environment=production,application=odoo,created-by=github-actions \
-          --reservation-affinity=any \
-          --metadata-from-file startup-script=./startup-script.sh \
-          --metadata instance-name=$INSTANCE_NAME,deployment-time=$(date -u +"%Y-%m-%dT%H:%M:%SZ"),github-actor=${{ github.actor }}
-        
-        echo "INSTANCE_NAME=$INSTANCE_NAME" >> $GITHUB_ENV
-        echo "ZONE=$ZONE" >> $GITHUB_ENV
+# Python
+sudo -u odoo python3 -m venv /opt/odoo/venv
+sudo -u odoo /opt/odoo/venv/bin/pip install --upgrade pip wheel setuptools
 
-    - name: ⏳ Wait for instance to be ready
-      run: |
-        INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
-        
-        # Obtener zona según el tipo de evento
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          ZONE="${{ github.event.inputs.zone || 'southamerica-west1-a' }}"
-        else
-          ZONE="${{ github.event.client_payload.zone || 'southamerica-west1-a' }}"
-        fi
-        
-        echo "⏳ Esperando que la instancia esté lista..."
-        
-        # Esperar hasta que la instancia esté corriendo
-        for i in {1..30}; do
-          STATUS=$(gcloud compute instances describe $INSTANCE_NAME --zone=$ZONE --format="get(status)")
-          if [ "$STATUS" = "RUNNING" ]; then
-            echo "✅ Instancia está corriendo"
-            break
-          fi
-          echo "⏳ Esperando... ($i/30) Estado actual: $STATUS"
-          sleep 10
-        done
-        
-        # Esperar que SSH esté disponible
-        echo "⏳ Verificando disponibilidad de SSH..."
-        for i in {1..20}; do
-          if gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="echo 'SSH disponible'" --ssh-flag="-o ConnectTimeout=5" &>/dev/null; then
-            echo "✅ SSH está disponible"
-            break
-          fi
-          echo "⏳ Esperando SSH... ($i/20)"
-          sleep 15
-        done
+# Dependencias críticas
+sudo -u odoo /opt/odoo/venv/bin/pip install \
+psycopg2-binary babel lxml lxml_html_clean pyOpenSSL \
+cryptography greenlet==2.0.2 gevent==22.10.2
+
+# Resto de dependencias
+sudo -u odoo /opt/odoo/venv/bin/pip install \
+rjsmin geoip2 chardet python-stdnum decorator docutils \
+freezegun html2text Jinja2 libsass MarkupSafe num2words \
+ofxparse passlib Pillow polib psutil pydot pyparsing \
+PyPDF2 pyserial python-dateutil python-ldap pytz pyusb \
+qrcode reportlab requests vobject Werkzeug xlrd xlsxwriter \
+xlwt zeep
+
+sudo -u odoo /opt/odoo/venv/bin/pip install -r /opt/odoo/requirements.txt || true
+
+# Configuración
+mkdir -p /etc/odoo /var/log/odoo /var/lib/odoo
+chown odoo:odoo /var/log/odoo /var/lib/odoo
+
+cat > /etc/odoo/odoo.conf << EOF
+[options]
+admin_passwd = admin
+db_host = False
+db_port = False
+db_user = odoo
+db_password = False
+addons_path = /opt/odoo/addons
+xmlrpc_port = 8069
+proxy_mode = True
+list_db = False
+geoip_database = False
+logfile = /var/log/odoo/odoo.log
+log_level = info
+data_dir = /var/lib/odoo
+EOF
+
+chown odoo:odoo /etc/odoo/odoo.conf
+chmod 640 /etc/odoo/odoo.conf
+
+# Servicio
+cat > /etc/systemd/system/odoo.service << EOF
+[Unit]
+Description=Odoo18
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=odoo
+Group=odoo
+ExecStart=/opt/odoo/venv/bin/python3 /opt/odoo/odoo-bin -c /etc/odoo/odoo.conf
+StandardOutput=journal+console
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Inicializar BD
+cd /tmp
+sudo -u odoo /opt/odoo/venv/bin/python3 /opt/odoo/odoo-bin \
+-c /etc/odoo/odoo.conf -d odoo -i base --stop-after-init
+
+# CRÍTICO: Establecer contraseña usando shell
+echo "🔑 Configurando contraseña admin..."
+sudo -u odoo /opt/odoo/venv/bin/python3 /opt/odoo/odoo-bin shell -d odoo -c /etc/odoo/odoo.conf --no-http << 'PYTHON_SCRIPT'
+admin = env['res.users'].browse(2)
+admin.password = 'admin'
+env.cr.commit()
+exit()
+PYTHON_SCRIPT
+
+# Iniciar servicio
+systemctl daemon-reload
+systemctl enable odoo
+systemctl start odoo
+
+echo "✅ Instalación completada!"
+echo "Usuario: admin / Contraseña: admin"
+STARTUP_SCRIPT
+
+# Firewall
+gcloud compute firewall-rules create allow-odoo-8069 \
+  --allow tcp:8069 \
+  --source-ranges 0.0.0.0/0 \
+  --target-tags odoo-server \
+  --quiet 2>/dev/null || echo "Firewall OK"
+
+# Crear VM
+gcloud compute instances create $VM_NAME \
+  --zone=$ZONE \
+  --machine-type=e2-micro \
+  --network-interface=network-tier=PREMIUM,subnet=default \
+  --metadata-from-file startup-script=/tmp/startup-odoo18-final.sh \
+  --create-disk=auto-delete=yes,boot=yes,device-name=$VM_NAME,image=projects/ubuntu-os-cloud/global/images/ubuntu-2204-jammy-v20241218,mode=rw,size=20,type=pd-standard \
+  --tags=odoo-server
+
+sleep 5
+EXTERNAL_IP=$(gcloud compute instances describe $VM_NAME --zone=$ZONE --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+
+echo "✅ VM: $VM_NAME"
+echo "📍 Zona: $ZONE"
+echo "🌐 IP: $EXTERNAL_IP"
+echo "⏳ Esperar 10 min"
+echo ""
+echo "🔗 http://$EXTERNAL_IP:8069"
+echo "👤 admin / 🔑 admin"
+echo ""
+echo "SSH: gcloud compute ssh $VM_NAME --zone=$ZONE"
+echo "Logs: gcloud compute ssh $VM_NAME --zone=$ZONE --command='sudo tail -f /var/log/startup-script.log'"
