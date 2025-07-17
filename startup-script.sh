@@ -311,7 +311,7 @@ db_host = localhost
 db_port = 5432
 db_user = $POSTGRES_USER
 db_password = $POSTGRES_PASSWORD
-db_name = False
+db_name = odoo
 addons_path = $ADDONS_PATH
 
 # Logging
@@ -342,7 +342,7 @@ data_dir = /var/lib/odoo
 
 # Security
 list_db = True
-dbfilter = 
+dbfilter = odoo
 
 # Performance
 unaccent = False
