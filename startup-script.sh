@@ -342,7 +342,7 @@ data_dir = /var/lib/odoo
 
 # Security
 list_db = True
-dbfilter = odoo
+# dbfilter = odoo
 
 # Performance
 unaccent = False
