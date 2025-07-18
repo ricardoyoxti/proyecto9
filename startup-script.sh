@@ -685,3 +685,4 @@ echo "
 ║     • Instancia: $INSTANCE_NAME                                              ║
 ║     • Fecha de despliegue: $DEPLOYMENT_TIME                                  ║
 ║     • GitHub Actor: $GITHUB
+"
