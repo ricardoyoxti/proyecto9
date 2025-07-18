@@ -667,7 +667,7 @@ echo -e "\n=== Estado de PostgreSQL ==="
 systemctl status postgresql --no-pager -l
 
 echo -e "\n=== Puertos en escucha ==="
-netstat -tuln | grep -E ":($ODOO_PORT|5432) "
+ss -tuln | grep -E ":($ODOO_PORT|5432) "
 
 echo -e "\n=== Información de la base de datos ==="
 echo "Base de datos: $POSTGRES_DB"
