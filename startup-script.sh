@@ -31,7 +31,8 @@ ODOO_PORT="8069"
 POSTGRES_USER="odoo"
 POSTGRES_DB="odoo"
 POSTGRES_PASSWORD="odoo123"
-ADMIN_PASSWORD="admin123"  # Contraseña del administrador Odoo
+ADMIN_PASSWORD="admin123"  # Contraseña del administrador Odoo (master password)
+ADMIN_LOGIN_PASSWORD="AdminSecure2024!"  # Contraseña para login web del usuario admin
 
 log "🚀 Iniciando instalación de Odoo 18 Community"
 info "📋 Instancia: $INSTANCE_NAME"
@@ -408,6 +409,52 @@ check_database_status() {
     fi
 }
 
+# Función para generar hash de contraseña para Odoo
+generate_password_hash() {
+    local password="$1"
+    # Usar Python para generar el hash usando passlib como lo hace Odoo
+    python3 -c "
+import sys
+try:
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(schemes=['pbkdf2_sha512'], deprecated='auto')
+    print(pwd_context.hash('$password'))
+except ImportError:
+    # Fallback si passlib no está disponible
+    import hashlib
+    import os
+    import base64
+    salt = os.urandom(32)
+    pwdhash = hashlib.pbkdf2_hmac('sha512', '$password'.encode('utf-8'), salt, 100000)
+    print('pbkdf2_sha512\$100000\$' + base64.b64encode(salt).decode('ascii') + '\$' + base64.b64encode(pwdhash).decode('ascii'))
+"
+}
+
+# Función para establecer la contraseña del usuario admin
+set_admin_password() {
+    local db_name="$1"
+    local password="$2"
+    
+    log "🔐 Estableciendo contraseña del usuario admin..."
+    
+    # Generar hash de la contraseña
+    local password_hash=$(generate_password_hash "$password")
+    
+    if [ -z "$password_hash" ]; then
+        error "No se pudo generar el hash de la contraseña"
+        return 1
+    fi
+    
+    # Actualizar la contraseña en la base de datos
+    if sudo -u postgres psql -d "$db_name" -c "UPDATE res_users SET password = '$password_hash' WHERE login = 'admin';" > /dev/null 2>&1; then
+        log "✅ Contraseña del usuario admin establecida correctamente"
+        return 0
+    else
+        error "No se pudo establecer la contraseña del usuario admin"
+        return 1
+    fi
+}
+
 # Función para inicializar la base de datos con módulos específicos
 initialize_database() {
     local db_name="$1"
@@ -434,6 +481,11 @@ initialize_database() {
         --log-level=info; then
         
         log "✅ Base de datos '$db_name' inicializada correctamente"
+        
+        # Establecer la contraseña del usuario admin después de la inicialización
+        sleep 2  # Esperar un poco para que la BD esté lista
+        set_admin_password "$db_name" "$ADMIN_LOGIN_PASSWORD"
+        
         return 0
     else
         error "Falló la inicialización de la base de datos '$db_name'"
@@ -518,6 +570,8 @@ setup_database() {
             ;;
         "INITIALIZED")
             log "✅ Base de datos ya está inicializada"
+            # Aún así, actualizar la contraseña del admin por si acaso
+            set_admin_password "$POSTGRES_DB" "$ADMIN_LOGIN_PASSWORD"
             info "💡 Si necesitas actualizar módulos, puedes ejecutar:"
             info "    sudo -u $ODOO_USER $ODOO_HOME/venv/bin/python3 $ODOO_HOME/odoo-bin -c $ODOO_CONFIG -d $POSTGRES_DB --update=all --stop-after-init"
             ;;
@@ -630,308 +684,4 @@ echo "
 ║  📋 Información de la Instancia:                                           ║
 ║     • Instancia: $INSTANCE_NAME                                              ║
 ║     • Fecha de despliegue: $DEPLOYMENT_TIME                                  ║
-║     • GitHub Actor: $GITHUB_ACTOR                                           ║
-║                                                                              ║
-║  🌐 Acceso Web:                                                             ║
-║     • URL: http://$EXTERNAL_IP:$ODOO_PORT                                   ║
-║     • Usuario administrador: admin                                           ║
-║     • Contraseña: $ADMIN_PASSWORD                                           ║
-║                                                                              ║
-║  🗄️ Base de datos:                                                         ║
-║     • Nombre: $POSTGRES_DB                                                  ║
-║     • Usuario: $POSTGRES_USER                                               ║
-║     • Estado: Inicializada con módulos base                                 ║
-║                                                                              ║
-║  📁 Rutas importantes:                                                      ║
-║     • Instalación: $ODOO_HOME                                              ║
-║     • Configuración: $ODOO_CONFIG                                          ║
-║     • Logs: /var/log/odoo/odoo.log                                          ║
-║     • Datos: /var/lib/odoo                                                  ║
-║                                                                              ║
-║  🔧 Comandos útiles:                                                        ║
-║     • Estado del servicio: systemctl status odoo                           ║
-║     • Ver logs: tail -f /var/log/odoo/odoo.log                             ║
-║     • Reiniciar: systemctl restart odoo                                     ║
-║     • Actualizar módulos: sudo -u $ODOO_USER $ODOO_HOME/venv/bin/python3 ║
-║       $ODOO_HOME/odoo-bin -c $ODOO_CONFIG -d $POSTGRES_DB --update=all    ║
-║       --stop-after-init                                                     ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-"
-
-# Diagnóstico final mejorado
-log "🔍 Diagnóstico final del sistema:"
-echo "=== Estado del servicio Odoo ==="
-systemctl status odoo --no-pager -l
-
-echo -e "\n=== Estado de PostgreSQL ==="
-systemctl status postgresql --no-pager -l
-
-echo -e "\n=== Puertos en escucha ==="
-ss -tuln | grep -E ":($ODOO_PORT|5432) "
-
-echo -e "\n=== Información de la base de datos ==="
-echo "Base de datos: $POSTGRES_DB"
-echo "Tablas en la base de datos:"
-sudo -u postgres psql -d "$POSTGRES_DB" -c "SELECT schemaname, tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename;" 2>/dev/null | head -20
-
-echo -e "\n=== Usuarios en Odoo ==="
-sudo -u postgres psql -d "$POSTGRES_DB" -c "SELECT id, login, name, active FROM res_users ORDER BY id;" 2>/dev/null || echo "No se pudo obtener información de usuarios"
-
-echo -e "\n=== Módulos instalados ==="
-sudo -u postgres psql -d "$POSTGRES_DB" -c "SELECT name, state FROM ir_module_module WHERE state = 'installed' ORDER BY name;" 2>/dev/null | head -20
-
-echo -e "\n=== Espacio en disco ==="
-df -h /
-
-echo -e "\n=== Memoria del sistema ==="
-free -h
-
-echo -e "\n=== Últimas líneas del log de Odoo ==="
-if [ -f /var/log/odoo/odoo.log ]; then
-    tail -15 /var/log/odoo/odoo.log
-else
-    echo "No hay log de Odoo disponible"
-fi
-
-echo -e "\n=== Verificación final de conectividad ==="
-if curl -s --max-time 10 "http://localhost:$ODOO_PORT/web/database/selector" > /dev/null 2>&1; then
-    log "✅ Odoo responde correctamente en http://localhost:$ODOO_PORT"
-else
-    warn "⚠️ Odoo no responde en http://localhost:$ODOO_PORT"
-fi
-
-# Crear script de post-instalación para tareas comunes
-log "📝 Creando script de post-instalación..."
-cat > /usr/local/bin/odoo-utils << 'EOF'
-#!/bin/bash
-
-# Script de utilidades para Odoo 18
-# Creado automáticamente durante la instalación
-
-ODOO_USER="odoo"
-ODOO_HOME="/opt/odoo"
-ODOO_CONFIG="/etc/odoo/odoo.conf"
-POSTGRES_DB="odoo"
-POSTGRES_USER="odoo"
-
-show_help() {
-    echo "Utilidades para Odoo 18"
-    echo ""
-    echo "Uso: odoo-utils [COMANDO]"
-    echo ""
-    echo "Comandos disponibles:"
-    echo "  status      - Mostrar estado del servicio"
-    echo "  logs        - Mostrar logs en tiempo real"
-    echo "  restart     - Reiniciar Odoo"
-    echo "  stop        - Detener Odoo"
-    echo "  start       - Iniciar Odoo"
-    echo "  update-all  - Actualizar todos los módulos"
-    echo "  install     - Instalar módulo específico"
-    echo "  backup      - Crear backup de la base de datos"
-    echo "  restore     - Restaurar backup de la base de datos"
-    echo "  reset-admin - Restablecer contraseña del admin"
-    echo "  db-info     - Mostrar información de la base de datos"
-    echo "  help        - Mostrar esta ayuda"
-}
-
-case "$1" in
-    "status")
-        systemctl status odoo --no-pager -l
-        ;;
-    "logs")
-        tail -f /var/log/odoo/odoo.log
-        ;;
-    "restart")
-        echo "Reiniciando Odoo..."
-        systemctl restart odoo
-        echo "Odoo reiniciado"
-        ;;
-    "stop")
-        echo "Deteniendo Odoo..."
-        systemctl stop odoo
-        echo "Odoo detenido"
-        ;;
-    "start")
-        echo "Iniciando Odoo..."
-        systemctl start odoo
-        echo "Odoo iniciado"
-        ;;
-    "update-all")
-        echo "Actualizando todos los módulos..."
-        systemctl stop odoo
-        sudo -u $ODOO_USER $ODOO_HOME/venv/bin/python3 $ODOO_HOME/odoo-bin -c $ODOO_CONFIG -d $POSTGRES_DB --update=all --stop-after-init
-        systemctl start odoo
-        echo "Módulos actualizados"
-        ;;
-    "install")
-        if [ -z "$2" ]; then
-            echo "Uso: odoo-utils install [nombre_modulo]"
-            exit 1
-        fi
-        echo "Instalando módulo: $2"
-        systemctl stop odoo
-        sudo -u $ODOO_USER $ODOO_HOME/venv/bin/python3 $ODOO_HOME/odoo-bin -c $ODOO_CONFIG -d $POSTGRES_DB --install=$2 --stop-after-init
-        systemctl start odoo
-        echo "Módulo $2 instalado"
-        ;;
-    "backup")
-        BACKUP_FILE="/tmp/odoo_backup_$(date +%Y%m%d_%H%M%S).sql"
-        echo "Creando backup en: $BACKUP_FILE"
-        sudo -u postgres pg_dump $POSTGRES_DB > $BACKUP_FILE
-        echo "Backup creado: $BACKUP_FILE"
-        ;;
-    "restore")
-        if [ -z "$2" ]; then
-            echo "Uso: odoo-utils restore [archivo_backup]"
-            exit 1
-        fi
-        echo "Restaurando backup: $2"
-        systemctl stop odoo
-        sudo -u postgres dropdb $POSTGRES_DB
-        sudo -u postgres createdb -O $POSTGRES_USER $POSTGRES_DB
-        sudo -u postgres psql $POSTGRES_DB < $2
-        systemctl start odoo
-        echo "Backup restaurado"
-        ;;
-    "reset-admin")
-        echo "Restableciendo contraseña del administrador..."
-        sudo -u postgres psql -d $POSTGRES_DB -c "UPDATE res_users SET password = 'admin' WHERE login = 'admin';"
-        echo "Contraseña del admin restablecida a: admin"
-        ;;
-    "db-info")
-        echo "=== Información de la base de datos ==="
-        echo "Base de datos: $POSTGRES_DB"
-        echo "Usuario: $POSTGRES_USER"
-        echo ""
-        echo "Número de tablas:"
-        sudo -u postgres psql -d $POSTGRES_DB -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';"
-        echo ""
-        echo "Usuarios en Odoo:"
-        sudo -u postgres psql -d $POSTGRES_DB -c "SELECT id, login, name, active FROM res_users ORDER BY id;"
-        echo ""
-        echo "Módulos instalados:"
-        sudo -u postgres psql -d $POSTGRES_DB -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed';" -tAc
-        ;;
-    "help"|"")
-        show_help
-        ;;
-    *)
-        echo "Comando desconocido: $1"
-        show_help
-        exit 1
-        ;;
-esac
-EOF
-
-chmod +x /usr/local/bin/odoo-utils
-log "✅ Script de utilidades creado: /usr/local/bin/odoo-utils"
-
-# Crear script de monitoreo
-log "📊 Creando script de monitoreo..."
-cat > /usr/local/bin/odoo-monitor << 'EOF'
-#!/bin/bash
-
-# Script de monitoreo para Odoo 18
-# Verifica el estado del servicio y envía alertas si es necesario
-
-ODOO_PORT="8069"
-LOG_FILE="/var/log/odoo-monitor.log"
-ALERT_FILE="/tmp/odoo-alert.flag"
-
-log_message() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a $LOG_FILE
-}
-
-check_service() {
-    if systemctl is-active --quiet odoo; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-check_port() {
-    if ss -tuln 2>/dev/null | grep -q ":$ODOO_PORT " || netstat -tuln 2>/dev/null | grep -q ":$ODOO_PORT "; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-check_response() {
-    if curl -s --max-time 10 "http://localhost:$ODOO_PORT/web/database/selector" > /dev/null 2>&1; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-main() {
-    log_message "Iniciando verificación de Odoo..."
-    
-    # Verificar servicio
-    if ! check_service; then
-        log_message "ERROR: Servicio Odoo no está activo"
-        echo "El servicio Odoo no está ejecutándose. Intentando reiniciar..."
-        systemctl restart odoo
-        sleep 10
-        if check_service; then
-            log_message "INFO: Servicio Odoo reiniciado exitosamente"
-        else
-            log_message "ERROR: No se pudo reiniciar el servicio Odoo"
-            exit 1
-        fi
-    fi
-    
-    # Verificar puerto
-    if ! check_port; then
-        log_message "ERROR: Puerto $ODOO_PORT no está escuchando"
-        exit 1
-    fi
-    
-    # Verificar respuesta HTTP
-    if ! check_response; then
-        log_message "WARNING: Odoo no responde correctamente en HTTP"
-        exit 1
-    fi
-    
-    log_message "INFO: Odoo está funcionando correctamente"
-    
-    # Limpiar flag de alerta si existe
-    if [ -f "$ALERT_FILE" ]; then
-        rm "$ALERT_FILE"
-    fi
-}
-
-main "$@"
-EOF
-
-chmod +x /usr/local/bin/odoo-monitor
-log "✅ Script de monitoreo creado: /usr/local/bin/odoo-monitor"
-
-# Crear tarea cron para monitoreo (opcional)
-log "⏰ Configurando monitoreo automático..."
-cat > /etc/cron.d/odoo-monitor << 'EOF'
-# Monitoreo de Odoo cada 5 minutos
-*/5 * * * * root /usr/local/bin/odoo-monitor >/dev/null 2>&1
-EOF
-
-log "✅ Monitoreo automático configurado (cada 5 minutos)"
-
-log "✅ Script de instalación completado exitosamente"
-
-# Mostrar comandos útiles finales
-echo ""
-echo "🛠️  COMANDOS ÚTILES DISPONIBLES:"
-echo "================================"
-echo "• odoo-utils status          - Ver estado del servicio"
-echo "• odoo-utils logs           - Ver logs en tiempo real"
-echo "• odoo-utils restart        - Reiniciar Odoo"
-echo "• odoo-utils update-all     - Actualizar todos los módulos"
-echo "• odoo-utils install [mod]  - Instalar módulo específico"
-echo "• odoo-utils backup         - Crear backup de BD"
-echo "• odoo-utils db-info        - Ver info de la base de datos"
-echo "• odoo-monitor              - Verificar estado de Odoo"
-echo ""
-echo "📝 Para más información: odoo-utils help"
-echo ""
+║     • GitHub Actor: $GITHUB
