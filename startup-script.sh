@@ -288,6 +288,44 @@ sudo -u $ODOO_USER "$ODOO_HOME/venv/bin/python" -c "import odoo" 2>/dev/null || 
     warn "No se puede importar odoo directamente, pero continuando..."
 }
 
+# Función para configurar PostgreSQL para Odoo
+configure_postgresql_for_odoo() {
+    print_step "Configurando PostgreSQL para Odoo..."
+    
+    # Crear usuario de base de datos
+    sudo -u postgres createuser -s $ODOO_USER 2>/dev/null || true
+    
+    # Configurar autenticación en pg_hba.conf
+    PG_VERSION=$(sudo -u postgres psql -t -c "SELECT version();" | grep -oP '\d+\.\d+' | head -1)
+    PG_HBA_FILE="/etc/postgresql/$PG_VERSION/main/pg_hba.conf"
+    
+    print_message "Configurando autenticación en $PG_HBA_FILE..."
+    
+    # Hacer backup del archivo original
+    cp $PG_HBA_FILE ${PG_HBA_FILE}.backup
+    
+    # Configurar autenticación trust para conexiones locales
+    sed -i "s/local   all             all                                     peer/local   all             all                                     trust/" $PG_HBA_FILE
+    sed -i "s/host    all             all             127.0.0.1\/32            scram-sha-256/host    all             all             127.0.0.1\/32            trust/" $PG_HBA_FILE
+    sed -i "s/host    all             all             127.0.0.1\/32            md5/host    all             all             127.0.0.1\/32            trust/" $PG_HBA_FILE
+    sed -i "s/host    all             all             ::1\/128                 scram-sha-256/host    all             all             ::1\/128                 trust/" $PG_HBA_FILE
+    sed -i "s/host    all             all             ::1\/128                 md5/host    all             all             ::1\/128                 trust/" $PG_HBA_FILE
+    
+    # Reiniciar PostgreSQL para aplicar cambios
+    systemctl restart postgresql
+    
+    # Verificar que la conexión funciona
+    print_message "Verificando conexión a PostgreSQL..."
+    if sudo -u $ODOO_USER psql -h localhost -p 5432 -U $ODOO_USER postgres -c "\q" 2>/dev/null; then
+        print_message "Conexión a PostgreSQL verificada correctamente"
+    else
+        print_warning "Problema con la conexión a PostgreSQL, pero continuando..."
+    fi
+    
+    print_message "PostgreSQL configurado para Odoo"
+}
+
+
 # Configurar paths de addons mejorado
 log "📁 Configurando paths de addons..."
 ADDONS_PATH="$ODOO_HOME/addons"
