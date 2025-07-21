@@ -367,7 +367,7 @@ log_db_level = warning
 
 # HTTP
 xmlrpc_port = $ODOO_PORT
-xmlrpc_interface = 
+xmlrpc_interface = 0.0.0.0
 longpolling_port = 8072
 
 # Multiprocessing
