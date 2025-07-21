@@ -3,7 +3,7 @@ name: 🚀 Deploy Odoo 18 to Google Cloud
 on:
   repository_dispatch:
     types: [deploy-odoo]
-  workflow_dispatch:
+  workflow_dispatch:  # ✅ Permite ejecución manual
     inputs:
       instance_name:
         description: 'Nombre base para la instancia'
@@ -54,94 +54,57 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    
-    outputs:
-      instance_name: ${{ steps.generate_name.outputs.INSTANCE_NAME }}
-      instance_ip: ${{ steps.get_ip.outputs.EXTERNAL_IP }}
-      zone: ${{ steps.set_params.outputs.ZONE }}
+    timeout-minutes: 30  # Timeout más largo para la instalación completa
     
     steps:
     - name: 📥 Checkout code
       uses: actions/checkout@v4
 
     - name: 🔐 Authenticate to Google Cloud
-      uses: google-github-actions/auth@v2
+      uses: google-github-actions/auth@v1
       with:
         credentials_json: ${{ secrets.GCP_SA_KEY }}
 
     - name: ☁️ Set up Cloud SDK
-      uses: google-github-actions/setup-gcloud@v2
-
-    - name: ⚙️ Set deployment parameters
-      id: set_params
-      run: |
-        # Consolidar parámetros desde diferentes fuentes
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          BASE_NAME="${{ github.event.inputs.instance_name || 'odoo' }}"
-          MACHINE_TYPE="${{ github.event.inputs.machine_type || 'e2-medium' }}"
-          ZONE="${{ github.event.inputs.zone || 'southamerica-west1-a' }}"
-          DISK_SIZE="${{ github.event.inputs.disk_size || '20' }}"
-          WAIT_FOR_INSTALL="${{ github.event.inputs.wait_for_installation || 'true' }}"
-        else
-          BASE_NAME="${{ github.event.client_payload.instance_name || 'odoo' }}"
-          MACHINE_TYPE="${{ github.event.client_payload.machine_type || 'e2-medium' }}"
-          ZONE="${{ github.event.client_payload.zone || 'southamerica-west1-a' }}"
-          DISK_SIZE="${{ github.event.client_payload.disk_size || '20' }}"
-          WAIT_FOR_INSTALL="${{ github.event.client_payload.wait_for_installation || 'true' }}"
-        fi
-        
-        echo "BASE_NAME=$BASE_NAME" >> $GITHUB_OUTPUT
-        echo "MACHINE_TYPE=$MACHINE_TYPE" >> $GITHUB_OUTPUT
-        echo "ZONE=$ZONE" >> $GITHUB_OUTPUT
-        echo "DISK_SIZE=$DISK_SIZE" >> $GITHUB_OUTPUT
-        echo "WAIT_FOR_INSTALL=$WAIT_FOR_INSTALL" >> $GITHUB_OUTPUT
-        
-        echo "🔧 Parámetros configurados:"
-        echo "  Base name: $BASE_NAME"
-        echo "  Machine type: $MACHINE_TYPE"
-        echo "  Zone: $ZONE"
-        echo "  Disk size: ${DISK_SIZE}GB"
-        echo "  Wait for install: $WAIT_FOR_INSTALL"
+      uses: google-github-actions/setup-gcloud@v1
 
     - name: 🏷️ Generate instance name
       id: generate_name
       run: |
-        BASE_NAME="${{ steps.set_params.outputs.BASE_NAME }}"
+        # Obtener parámetros desde diferentes fuentes
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          BASE_NAME="${{ github.event.inputs.instance_name || 'odoo' }}"
+        else
+          BASE_NAME="${{ github.event.client_payload.instance_name || 'odoo' }}"
+        fi
+        
         TIMESTAMP=$(date +%Y%m%d-%H%M%S)
         INSTANCE_NAME="${BASE_NAME}-${TIMESTAMP}"
         
-        # Validar nombre de instancia (GCP naming rules)
-        if [[ ! $INSTANCE_NAME =~ ^[a-z]([-a-z0-9]*[a-z0-9])?$ ]] || [[ ${#INSTANCE_NAME} -gt 63 ]]; then
-          echo "❌ Error: Nombre de instancia inválido. Debe comenzar con letra minúscula, contener solo letras minúsculas, números y guiones, y tener máximo 63 caracteres."
+        # Validar nombre de instancia (solo letras minúsculas, números y guiones)
+        if [[ ! $INSTANCE_NAME =~ ^[a-z0-9-]+$ ]]; then
+          echo "❌ Error: El nombre de la instancia solo puede contener letras minúsculas, números y guiones"
           exit 1
         fi
         
         echo "INSTANCE_NAME=$INSTANCE_NAME" >> $GITHUB_OUTPUT
-        echo "🏗️ Nombre de instancia: $INSTANCE_NAME"
-
-    - name: 🔍 Check if instance exists
-      id: check_instance
-      continue-on-error: true
-      run: |
-        INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
-        ZONE="${{ steps.set_params.outputs.ZONE }}"
-        
-        if gcloud compute instances describe $INSTANCE_NAME --zone=$ZONE &>/dev/null; then
-          echo "EXISTS=true" >> $GITHUB_OUTPUT
-          echo "⚠️ La instancia $INSTANCE_NAME ya existe en la zona $ZONE"
-        else
-          echo "EXISTS=false" >> $GITHUB_OUTPUT
-          echo "✅ La instancia $INSTANCE_NAME no existe, procediendo con la creación"
-        fi
+        echo "BASE_NAME=$BASE_NAME" >> $GITHUB_OUTPUT
+        echo "🏗️ Nombre de instancia generado: $INSTANCE_NAME"
 
     - name: 🖥️ Create VM Instance
-      if: steps.check_instance.outputs.EXISTS != 'true'
       run: |
         INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
-        MACHINE_TYPE="${{ steps.set_params.outputs.MACHINE_TYPE }}"
-        ZONE="${{ steps.set_params.outputs.ZONE }}"
-        DISK_SIZE="${{ steps.set_params.outputs.DISK_SIZE }}"
+        
+        # Obtener parámetros según el tipo de evento
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          MACHINE_TYPE="${{ github.event.inputs.machine_type || 'e2-medium' }}"
+          ZONE="${{ github.event.inputs.zone || 'southamerica-west1-a' }}"
+          DISK_SIZE="${{ github.event.inputs.disk_size || '20' }}"
+        else
+          MACHINE_TYPE="${{ github.event.client_payload.machine_type || 'e2-medium' }}"
+          ZONE="${{ github.event.client_payload.zone || 'southamerica-west1-a' }}"
+          DISK_SIZE="${{ github.event.client_payload.disk_size || '20' }}"
+        fi
         
         echo "🏗️ Creando instancia: $INSTANCE_NAME"
         echo "🖥️ Tipo de máquina: $MACHINE_TYPE"
@@ -156,7 +119,7 @@ jobs:
           --maintenance-policy=MIGRATE \
           --provisioning-model=STANDARD \
           --service-account=${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }} \
-          --scopes=https://www.googleapis.com/auth/cloud-platform \
+          --scopes=https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write,https://www.googleapis.com/auth/servicecontrol,https://www.googleapis.com/auth/service.management.readonly,https://www.googleapis.com/auth/trace.append \
           --tags=odoo-server,http-server,https-server \
           --image-family=ubuntu-2204-lts \
           --image-project=ubuntu-os-cloud \
@@ -169,152 +132,42 @@ jobs:
           --labels=environment=production,application=odoo,created-by=github-actions \
           --reservation-affinity=any \
           --metadata-from-file startup-script=./startup-script.sh \
-          --metadata instance-name=$INSTANCE_NAME,deployment-time=$(date -u +"%Y-%m-%dT%H:%M:%SZ"),github-actor=${{ github.actor }},github-repo=${{ github.repository }},github-run-id=${{ github.run_id }}
+          --metadata instance-name=$INSTANCE_NAME,deployment-time=$(date -u +"%Y-%m-%dT%H:%M:%SZ"),github-actor=${{ github.actor }}
+        
+        echo "INSTANCE_NAME=$INSTANCE_NAME" >> $GITHUB_ENV
+        echo "ZONE=$ZONE" >> $GITHUB_ENV
 
     - name: ⏳ Wait for instance to be ready
       run: |
         INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
-        ZONE="${{ steps.set_params.outputs.ZONE }}"
         
-        echo "⏳ Verificando que la instancia esté lista..."
+        # Obtener zona según el tipo de evento
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          ZONE="${{ github.event.inputs.zone || 'southamerica-west1-a' }}"
+        else
+          ZONE="${{ github.event.client_payload.zone || 'southamerica-west1-a' }}"
+        fi
+        
+        echo "⏳ Esperando que la instancia esté lista..."
         
         # Esperar hasta que la instancia esté corriendo
-        echo "🔄 Esperando que la instancia inicie..."
         for i in {1..30}; do
-          STATUS=$(gcloud compute instances describe $INSTANCE_NAME --zone=$ZONE --format="get(status)" 2>/dev/null || echo "NOT_FOUND")
-          
+          STATUS=$(gcloud compute instances describe $INSTANCE_NAME --zone=$ZONE --format="get(status)")
           if [ "$STATUS" = "RUNNING" ]; then
             echo "✅ Instancia está corriendo"
             break
-          elif [ "$STATUS" = "NOT_FOUND" ]; then
-            echo "❌ Error: Instancia no encontrada"
-            exit 1
           fi
-          
-          echo "⏳ Estado actual: $STATUS ($i/30)"
+          echo "⏳ Esperando... ($i/30) Estado actual: $STATUS"
           sleep 10
         done
         
-        if [ "$STATUS" != "RUNNING" ]; then
-          echo "❌ Error: La instancia no logró iniciar en el tiempo esperado"
-          exit 1
-        fi
-
-    - name: 🔌 Verify SSH connectivity
-      run: |
-        INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
-        ZONE="${{ steps.set_params.outputs.ZONE }}"
-        
-        echo "🔌 Verificando conectividad SSH..."
-        
-        for i in {1..24}; do
-          if gcloud compute ssh $INSTANCE_NAME \
-            --zone=$ZONE \
-            --command="echo 'SSH disponible - $(date)'" \
-            --ssh-flag="-o ConnectTimeout=10" \
-            --ssh-flag="-o StrictHostKeyChecking=no" \
-            --quiet 2>/dev/null; then
-            echo "✅ SSH está disponible y funcionando"
+        # Esperar que SSH esté disponible
+        echo "⏳ Verificando disponibilidad de SSH..."
+        for i in {1..20}; do
+          if gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="echo 'SSH disponible'" --ssh-flag="-o ConnectTimeout=5" &>/dev/null; then
+            echo "✅ SSH está disponible"
             break
           fi
-          echo "⏳ Esperando SSH... ($i/24)"
+          echo "⏳ Esperando SSH... ($i/20)"
           sleep 15
         done
-
-    - name: 📍 Get instance details
-      id: get_ip
-      run: |
-        INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
-        ZONE="${{ steps.set_params.outputs.ZONE }}"
-        
-        EXTERNAL_IP=$(gcloud compute instances describe $INSTANCE_NAME \
-          --zone=$ZONE \
-          --format="get(networkInterfaces[0].accessConfigs[0].natIP)")
-        
-        INTERNAL_IP=$(gcloud compute instances describe $INSTANCE_NAME \
-          --zone=$ZONE \
-          --format="get(networkInterfaces[0].networkIP)")
-        
-        echo "EXTERNAL_IP=$EXTERNAL_IP" >> $GITHUB_OUTPUT
-        echo "INTERNAL_IP=$INTERNAL_IP" >> $GITHUB_OUTPUT
-        
-        echo "🌐 Detalles de la instancia:"
-        echo "  IP Externa: $EXTERNAL_IP"
-        echo "  IP Interna: $INTERNAL_IP"
-        echo "  Zona: $ZONE"
-
-    - name: ⏳ Wait for Odoo installation (opcional)
-      if: steps.set_params.outputs.WAIT_FOR_INSTALL == 'true'
-      run: |
-        INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
-        ZONE="${{ steps.set_params.outputs.ZONE }}"
-        EXTERNAL_IP="${{ steps.get_ip.outputs.EXTERNAL_IP }}"
-        
-        echo "⏳ Esperando que la instalación de Odoo complete..."
-        echo "🔗 La aplicación estará disponible en: http://$EXTERNAL_IP:8069"
-        
-        # Esperar hasta que Odoo responda
-        for i in {1..60}; do
-          if curl -f -s -m 10 "http://$EXTERNAL_IP:8069" >/dev/null 2>&1; then
-            echo "✅ Odoo está respondiendo en el puerto 8069"
-            break
-          fi
-          
-          # Verificar logs del startup script cada 5 intentos
-          if [ $((i % 5)) -eq 0 ]; then
-            echo "📋 Verificando progreso de la instalación..."
-            gcloud compute ssh $INSTANCE_NAME \
-              --zone=$ZONE \
-              --command="tail -10 /var/log/startup-script.log 2>/dev/null || echo 'Log no disponible aún'" \
-              --ssh-flag="-o ConnectTimeout=10" \
-              --quiet || echo "No se pudo verificar el log"
-          fi
-          
-          echo "⏳ Esperando Odoo... ($i/60) - Verificando http://$EXTERNAL_IP:8069"
-          sleep 30
-        done
-
-    - name: 📊 Deployment summary
-      run: |
-        INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
-        ZONE="${{ steps.set_params.outputs.ZONE }}"
-        EXTERNAL_IP="${{ steps.get_ip.outputs.EXTERNAL_IP }}"
-        MACHINE_TYPE="${{ steps.set_params.outputs.MACHINE_TYPE }}"
-        
-        echo "🎉 ¡Despliegue completado exitosamente!"
-        echo ""
-        echo "📋 Resumen del despliegue:"
-        echo "  🏷️  Nombre: $INSTANCE_NAME"
-        echo "  🌍 Zona: $ZONE"
-        echo "  🖥️  Tipo: $MACHINE_TYPE"
-        echo "  🌐 IP: $EXTERNAL_IP"
-        echo ""
-        echo "🔗 Enlaces importantes:"
-        echo "  📱 Odoo: http://$EXTERNAL_IP:8069"
-        echo "  🔧 SSH: gcloud compute ssh $INSTANCE_NAME --zone=$ZONE"
-        echo ""
-        echo "📝 Comandos útiles:"
-        echo "  Ver logs: gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command='sudo tail -f /var/log/startup-script.log'"
-        echo "  Detener: gcloud compute instances stop $INSTANCE_NAME --zone=$ZONE"
-        echo "  Eliminar: gcloud compute instances delete $INSTANCE_NAME --zone=$ZONE"
-
-    - name: 🔍 Health check
-      continue-on-error: true
-      run: |
-        EXTERNAL_IP="${{ steps.get_ip.outputs.EXTERNAL_IP }}"
-        
-        echo "🏥 Realizando verificación de salud..."
-        
-        # Test HTTP
-        if curl -f -s -m 10 "http://$EXTERNAL_IP:8069" >/dev/null; then
-          echo "✅ HTTP (8069): OK"
-        else
-          echo "⚠️ HTTP (8069): No disponible aún"
-        fi
-        
-        # Test SSH
-        if nc -z -w5 "$EXTERNAL_IP" 22 2>/dev/null; then
-          echo "✅ SSH (22): OK"
-        else
-          echo "⚠️ SSH (22): No disponible"
-        fi
