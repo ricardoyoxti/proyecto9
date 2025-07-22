@@ -430,6 +430,8 @@ initialize_database() {
         -c "$ODOO_CONFIG" \
         -d "$db_name" \
         --init="$modules" \
+        --admin-password="$ADMIN_PASSWORD" \
+        --without-demo=all \
         --stop-after-init \
         --log-level=info; then
         
