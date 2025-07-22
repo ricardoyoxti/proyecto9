@@ -131,8 +131,6 @@ jobs:
           --shielded-integrity-monitoring \
           --labels=environment=production,application=odoo,created-by=github-actions \
           --reservation-affinity=any \
-          #--metadata-from-file startup-script=./startup-script.sh \
-          --metadata instance-name=$INSTANCE_NAME,deployment-time=$(date -u +"%Y-%m-%dT%H:%M:%SZ"),github-actor=${{ github.actor }}
         
         echo "INSTANCE_NAME=$INSTANCE_NAME" >> $GITHUB_ENV
         echo "ZONE=$ZONE" >> $GITHUB_ENV
