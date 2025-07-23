@@ -11,13 +11,291 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log()     { echo -e "${GREEN}[$(date +'%F %T')] $1${NC}"; }
-error()   { echo -e "${RED}[$(date +'%F %T')] ERROR: $1${NC}"; }
-info()    { echo -e "${BLUE}[$(date +'%F %T')] INFO: $1${NC}"; }
-warn()    { echo -e "${YELLOW}[$(date +'%F %T')] WARN: $1${NC}"; }
+# Variables para WebSocket
+WEBSOCKET_PORT=8765
+WEBSOCKET_PID_FILE="/tmp/websocket_server.pid"
+
+# Funciones de logging con WebSocket
+send_websocket_log() {
+    local message="$1"
+    local level="${2:-info}"
+    
+    # Enviar a WebSocket si está disponible
+    if command -v python3 >/dev/null 2>&1 && [ -f "/tmp/websocket_client.py" ]; then
+        echo "{\"type\":\"log\",\"message\":\"$message\",\"level\":\"$level\"}" | python3 /tmp/websocket_client.py 2>/dev/null || true
+    fi
+    
+    # También mostrar en consola
+    case $level in
+        "error") echo -e "${RED}[$(date +'%F %T')] ERROR: $message${NC}" ;;
+        "warn") echo -e "${YELLOW}[$(date +'%F %T')] WARN: $message${NC}" ;;
+        "success") echo -e "${GREEN}[$(date +'%F %T')] SUCCESS: $message${NC}" ;;
+        "info") echo -e "${BLUE}[$(date +'%F %T')] INFO: $message${NC}" ;;
+        *) echo -e "${GREEN}[$(date +'%F %T')] $message${NC}" ;;
+    esac
+}
+
+send_websocket_progress() {
+    local step="$1"
+    local message="$2"
+    
+    if command -v python3 >/dev/null 2>&1 && [ -f "/tmp/websocket_client.py" ]; then
+        echo "{\"type\":\"progress\",\"step\":$step,\"message\":\"$message\"}" | python3 /tmp/websocket_client.py 2>/dev/null || true
+    fi
+}
+
+log()     { send_websocket_log "$1" "info"; }
+error()   { send_websocket_log "$1" "error"; }
+info()    { send_websocket_log "$1" "info"; }
+warn()    { send_websocket_log "$1" "warn"; }
+success() { send_websocket_log "$1" "success"; }
+
+# Crear servidor WebSocket
+create_websocket_server() {
+    log "🔧 Configurando servidor WebSocket para logs en tiempo real..."
+    
+    # Instalar dependencias de Python para WebSocket
+    apt-get update -y
+    apt-get install -y python3 python3-pip
+    pip3 install websockets asyncio
+    
+    # Crear servidor WebSocket
+    cat > /tmp/websocket_server.py << 'EOF'
+#!/usr/bin/env python3
+import asyncio
+import websockets
+import json
+import sys
+import threading
+import queue
+import signal
+import os
+
+# Cola para mensajes
+message_queue = queue.Queue()
+connected_clients = set()
+
+async def handle_client(websocket, path):
+    """Manejar conexión de cliente WebSocket"""
+    connected_clients.add(websocket)
+    print(f"Cliente conectado desde {websocket.remote_address}")
+    
+    try:
+        await websocket.wait_closed()
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    finally:
+        connected_clients.discard(websocket)
+        print(f"Cliente desconectado")
+
+async def broadcast_message(message):
+    """Enviar mensaje a todos los clientes conectados"""
+    if connected_clients:
+        # Crear lista de tareas para enviar a todos los clientes
+        tasks = []
+        for client in connected_clients.copy():
+            tasks.append(send_to_client(client, message))
+        
+        # Ejecutar todas las tareas
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+async def send_to_client(client, message):
+    """Enviar mensaje a un cliente específico"""
+    try:
+        await client.send(message)
+    except websockets.exceptions.ConnectionClosed:
+        connected_clients.discard(client)
+    except Exception as e:
+        print(f"Error enviando mensaje: {e}")
+        connected_clients.discard(client)
+
+def stdin_reader():
+    """Leer mensajes desde stdin en un hilo separado"""
+    while True:
+        try:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            message_queue.put(line.strip())
+        except:
+            break
+
+async def message_processor():
+    """Procesar mensajes de la cola"""
+    while True:
+        try:
+            # Verificar si hay mensajes en la cola (no bloqueante)
+            try:
+                message = message_queue.get_nowait()
+                await broadcast_message(message)
+            except queue.Empty:
+                await asyncio.sleep(0.1)
+        except Exception as e:
+            print(f"Error procesando mensaje: {e}")
+            await asyncio.sleep(1)
+
+async def main():
+    """Función principal del servidor"""
+    print(f"Iniciando servidor WebSocket en puerto {sys.argv[1] if len(sys.argv) > 1 else 8765}")
+    
+    # Iniciar hilo para leer stdin
+    stdin_thread = threading.Thread(target=stdin_reader, daemon=True)
+    stdin_thread.start()
+    
+    # Iniciar servidor WebSocket
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
+    
+    # Crear tareas
+    server_task = websockets.serve(handle_client, "0.0.0.0", port)
+    message_task = message_processor()
+    
+    # Ejecutar servidor y procesador de mensajes
+    await asyncio.gather(server_task, message_task)
+
+def signal_handler(signum, frame):
+    """Manejar señales para cierre limpio"""
+    print("Cerrando servidor WebSocket...")
+    os._exit(0)
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Servidor WebSocket cerrado")
+EOF
+
+    # Crear cliente WebSocket simple para enviar mensajes
+    cat > /tmp/websocket_client.py << 'EOF'
+#!/usr/bin/env python3
+import sys
+import socket
+import time
+
+def send_message():
+    """Enviar mensaje al servidor WebSocket local"""
+    try:
+        message = sys.stdin.read().strip()
+        if not message:
+            return
+            
+        # Crear socket TCP simple para enviar al servidor local
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        
+        # En lugar de WebSocket completo, usar un método más simple
+        # Escribir a un archivo que el servidor puede leer
+        with open('/tmp/websocket_messages', 'a') as f:
+            f.write(message + '\n')
+            f.flush()
+            
+    except Exception as e:
+        # Fallar silenciosamente para no interrumpir el script principal
+        pass
+
+if __name__ == "__main__":
+    send_message()
+EOF
+
+    chmod +x /tmp/websocket_server.py
+    chmod +x /tmp/websocket_client.py
+    
+    # Crear versión simplificada que use archivos
+    cat > /tmp/websocket_simple_server.py << 'EOF'
+#!/usr/bin/env python3
+import asyncio
+import websockets
+import json
+import os
+import time
+
+connected_clients = set()
+
+async def handle_client(websocket, path):
+    """Manejar conexión de cliente WebSocket"""
+    connected_clients.add(websocket)
+    print(f"Cliente WebSocket conectado desde {websocket.remote_address}")
+    
+    try:
+        await websocket.wait_closed()
+    except:
+        pass
+    finally:
+        connected_clients.discard(websocket)
+
+async def read_messages():
+    """Leer mensajes del archivo y enviarlos a clientes"""
+    message_file = '/tmp/websocket_messages'
+    last_position = 0
+    
+    while True:
+        try:
+            if os.path.exists(message_file):
+                with open(message_file, 'r') as f:
+                    f.seek(last_position)
+                    new_lines = f.readlines()
+                    if new_lines:
+                        for line in new_lines:
+                            line = line.strip()
+                            if line and connected_clients:
+                                # Enviar a todos los clientes conectados
+                                disconnected = []
+                                for client in connected_clients:
+                                    try:
+                                        await client.send(line)
+                                    except:
+                                        disconnected.append(client)
+                                
+                                # Remover clientes desconectados
+                                for client in disconnected:
+                                    connected_clients.discard(client)
+                        
+                        last_position = f.tell()
+            
+            await asyncio.sleep(0.5)
+            
+        except Exception as e:
+            print(f"Error leyendo mensajes: {e}")
+            await asyncio.sleep(1)
+
+async def main():
+    port = int(os.environ.get('WEBSOCKET_PORT', '8765'))
+    print(f"Servidor WebSocket iniciado en puerto {port}")
+    
+    # Limpiar archivo de mensajes
+    open('/tmp/websocket_messages', 'w').close()
+    
+    # Iniciar servidor y lector de mensajes
+    server = await websockets.serve(handle_client, "0.0.0.0", port)
+    await asyncio.gather(server.wait_closed(), read_messages())
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Servidor cerrado")
+EOF
+
+    chmod +x /tmp/websocket_simple_server.py
+    
+    # Iniciar servidor WebSocket en background
+    nohup python3 /tmp/websocket_simple_server.py > /var/log/websocket-server.log 2>&1 &
+    WEBSOCKET_PID=$!
+    echo $WEBSOCKET_PID > $WEBSOCKET_PID_FILE
+    
+    # Esperar un poco para que el servidor inicie
+    sleep 2
+    
+    success "✅ Servidor WebSocket iniciado (PID: $WEBSOCKET_PID)"
+}
 
 # ➕ Obtener metadatos desde GCP con mejor manejo de errores
 log "🔍 Obteniendo metadatos de GCP..."
+send_websocket_progress 0 "Obteniendo metadatos de GCP..."
+
 INSTANCE_NAME=$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/attributes/instance-name" -H "Metadata-Flavor: Google" 2>/dev/null || echo "odoo-instance")
 DEPLOYMENT_TIME=$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/attributes/deployment-time" -H "Metadata-Flavor: Google" 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")
 GITHUB_ACTOR=$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/attributes/github-actor" -H "Metadata-Flavor: Google" 2>/dev/null || echo "unknown")
@@ -38,6 +316,9 @@ info "📋 Instancia: $INSTANCE_NAME"
 info "📅 Despliegue: $DEPLOYMENT_TIME"
 info "👤 GitHub actor: $GITHUB_ACTOR"
 
+# Crear servidor WebSocket para logs en tiempo real
+create_websocket_server
+
 # Función para verificar si un comando existe
 command_exists() {
     command -v "$1" >/dev/null 2>&1
@@ -53,15 +334,18 @@ check_internet() {
 
 # Verificar conectividad
 log "🌐 Verificando conectividad a internet..."
+send_websocket_progress 1 "Verificando conectividad a internet..."
 check_internet
 
 # Actualización del sistema
 log "📦 Actualizando sistema..."
+send_websocket_progress 2 "Actualizando paquetes del sistema..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y && apt-get upgrade -y
 
 # Instalar dependencias completas del sistema
 log "🔧 Instalando dependencias del sistema..."
+send_websocket_progress 3 "Instalando dependencias del sistema..."
 apt-get install -y \
     wget git curl unzip python3 python3-venv python3-pip python3-dev \
     libxml2-dev libxslt1-dev libevent-dev libsasl2-dev libldap2-dev libpq-dev \
@@ -74,6 +358,7 @@ apt-get install -y \
 
 # Instalar PostgreSQL con mejor configuración
 log "🐘 Instalando PostgreSQL..."
+send_websocket_progress 4 "Instalando y configurando PostgreSQL..."
 apt-get install -y postgresql postgresql-contrib postgresql-server-dev-all
 
 # Configurar PostgreSQL para mejor rendimiento
@@ -100,7 +385,7 @@ systemctl start postgresql
 log "🔍 Verificando estado de PostgreSQL..."
 for i in {1..5}; do
     if systemctl is-active --quiet postgresql; then
-        log "✅ PostgreSQL está ejecutándose"
+        success "✅ PostgreSQL está ejecutándose"
         break
     fi
     warn "PostgreSQL no está listo, esperando... (intento $i/5)"
@@ -114,22 +399,24 @@ done
 
 # Crear usuario y base de datos en PostgreSQL con mejor manejo
 log "🗄️ Configurando PostgreSQL..."
+send_websocket_progress 5 "Configurando base de datos PostgreSQL..."
 sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname = '$POSTGRES_USER'" | grep -q 1 || {
     sudo -u postgres psql -c "CREATE USER $POSTGRES_USER WITH CREATEDB PASSWORD '$POSTGRES_PASSWORD';"
-    log "✅ Usuario PostgreSQL creado: $POSTGRES_USER"
+    success "✅ Usuario PostgreSQL creado: $POSTGRES_USER"
 }
 
 # Crear usuario del sistema Odoo
 log "👤 Creando usuario del sistema Odoo..."
 if ! id "$ODOO_USER" &>/dev/null; then
     adduser --system --quiet --home=$ODOO_HOME --group $ODOO_USER
-    log "✅ Usuario del sistema creado: $ODOO_USER"
+    success "✅ Usuario del sistema creado: $ODOO_USER"
 else
     info "Usuario $ODOO_USER ya existe"
 fi
 
 # Instalar wkhtmltopdf con mejor detección de versión
 log "📄 Instalando wkhtmltopdf..."
+send_websocket_progress 6 "Instalando wkhtmltopdf..."
 cd /tmp
 UBUNTU_VERSION=$(lsb_release -rs)
 WKHTMLTOPDF_URL=""
@@ -163,7 +450,7 @@ rm -f "$WKHTMLTOPDF_FILE"
 
 # Verificar instalación de wkhtmltopdf
 if command_exists wkhtmltopdf; then
-    log "✅ wkhtmltopdf instalado correctamente"
+    success "✅ wkhtmltopdf instalado correctamente"
 else
     error "wkhtmltopdf no se instaló correctamente"
     exit 1
@@ -171,6 +458,7 @@ fi
 
 # Clonar Odoo con mejor manejo
 log "📥 Clonando Odoo $ODOO_VERSION..."
+send_websocket_progress 7 "Descargando Odoo 18 desde GitHub..."
 if [ -d "$ODOO_HOME" ]; then
     warn "Directorio $ODOO_HOME existe, eliminando..."
     rm -rf "$ODOO_HOME"
@@ -197,10 +485,11 @@ if [ ! -f "$ODOO_HOME/requirements.txt" ]; then
 fi
 
 chmod +x "$ODOO_HOME/odoo-bin"
-log "✅ Odoo clonado y configurado"
+success "✅ Odoo clonado y configurado"
 
 # Crear entorno virtual con mejor configuración
 log "🐍 Creando entorno virtual Python..."
+send_websocket_progress 8 "Configurando entorno virtual Python..."
 sudo -u $ODOO_USER python3 -m venv "$ODOO_HOME/venv"
 chown -R $ODOO_USER:$ODOO_USER "$ODOO_HOME/venv"
 
@@ -214,6 +503,7 @@ sudo -u $ODOO_USER "$ODOO_HOME/venv/bin/pip" install psycopg2-binary
 
 # Instalar dependencias de Python con mejor manejo de errores
 log "📦 Instalando dependencias Python..."
+send_websocket_progress 9 "Instalando dependencias Python de Odoo..."
 if ! sudo -u $ODOO_USER "$ODOO_HOME/venv/bin/pip" install \
     --no-cache-dir \
     --timeout 300 \
@@ -303,6 +593,7 @@ chown -R $ODOO_USER:$ODOO_USER /var/log/odoo /var/lib/odoo
 
 # Crear configuración mejorada
 log "⚙️ Configurando Odoo..."
+send_websocket_progress 10 "Creando configuración de Odoo..."
 cat > "$ODOO_CONFIG" << EOF
 [options]
 # Configuración básica
@@ -352,6 +643,7 @@ chown $ODOO_USER:$ODOO_USER "$ODOO_CONFIG"
 
 # Crear servicio systemd mejorado
 log "🔧 Creando servicio systemd para Odoo..."
+send_websocket_progress 11 "Creando servicio systemd para Odoo..."
 cat > /etc/systemd/system/odoo.service << EOF
 [Unit]
 Description=Odoo 18 Community Edition
@@ -414,7 +706,7 @@ initialize_database() {
     local modules="${2:-base}"
     
     log "🗄️ Inicializando base de datos '$db_name' con módulos: $modules"
-    
+    send_websocket_progress 12 " Inicializando base de datos '$db_name' con módulos: $modules"
     # Crear la base de datos si no existe
     if ! sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw "$db_name"; then
         log "📝 Creando base de datos '$db_name'..."
