@@ -170,3 +170,39 @@ jobs:
           echo "⏳ Esperando SSH... ($i/20)"
           sleep 15
         done
+        
+    - name: 🔥 Create firewall rules
+      run: |
+        # Regla para Odoo (puerto 8069)
+        gcloud compute firewall-rules create allow-odoo-${{ github.run_number }} \
+          --project=${{ env.PROJECT_ID }} \
+          --direction=INGRESS \
+          --priority=1000 \
+          --network=default \
+          --action=ALLOW \
+          --rules=tcp:8069 \
+          --source-ranges=0.0.0.0/0 \
+          --target-tags=odoo-server \
+          --description="Allow Odoo access on port 8069" || \
+        gcloud compute firewall-rules create allow-odoo \
+          --project=${{ env.PROJECT_ID }} \
+          --direction=INGRESS \
+          --priority=1000 \
+          --network=default \
+          --action=ALLOW \
+          --rules=tcp:8069 \
+          --source-ranges=0.0.0.0/0 \
+          --target-tags=odoo-server \
+          --description="Allow Odoo access on port 8069" || echo "Firewall rule already exists"
+        
+        # Regla para SSH (si no existe)
+        gcloud compute firewall-rules create allow-ssh \
+          --project=${{ env.PROJECT_ID }} \
+          --direction=INGRESS \
+          --priority=1000 \
+          --network=default \
+          --action=ALLOW \
+          --rules=tcp:22 \
+          --source-ranges=0.0.0.0/0 \
+          --target-tags=odoo-server \
+          --description="Allow SSH access" || echo "SSH firewall rule already exists"
