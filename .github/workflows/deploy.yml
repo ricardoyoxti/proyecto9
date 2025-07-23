@@ -131,7 +131,7 @@ jobs:
           --shielded-integrity-monitoring \
           --labels=environment=production,application=odoo,created-by=github-actions \
           --reservation-affinity=any \
-          --metadata-from-file startup-script=./startup-script.sh \
+          --metadata-from-file=startup-script=./startup-script.sh \
           --metadata=instance-name=$INSTANCE_NAME,deployment-time=$(date -u +"%Y-%m-%dT%H:%M:%SZ"),github-actor=${{ github.actor }},ssh-keys="${{ secrets.GCP_SSH_USER }}:${{ secrets.GCP_SSH_PUBLIC_KEY }}"
         
         echo "INSTANCE_NAME=$INSTANCE_NAME" >> $GITHUB_ENV
@@ -149,9 +149,6 @@ jobs:
         fi
         
         echo "⏳ Esperando que la instancia esté lista..."
-
-
-        
         
         # Esperar hasta que la instancia esté corriendo
         for i in {1..30}; do
@@ -176,11 +173,62 @@ jobs:
         done
 
     - name: ⚙️ Configurar Nginx + Certbot + WebSocket
-      uses: appleboy/ssh-action@v1.0.3
-      with:
-        host: ${{ env.INSTANCE_NAME }}.${{ env.ZONE }}.c.${{ env.PROJECT_ID }}.internal
-        username: ${{ secrets.GCP_SSH_USER }}
-        key: ${{ secrets.GCP_SSH_PRIVATE_KEY }}
+      run: |
+        INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          ZONE="${{ github.event.inputs.zone || 'southamerica-west1-a' }}"
+        else
+          ZONE="${{ github.event.client_payload.zone || 'southamerica-west1-a' }}"
+        fi
+        
+        # Ejecutar comandos remotos usando gcloud compute ssh
+        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command='
+          DOMAIN=${{ secrets.ODDO_DOMAIN }}
+          EMAIL=${{ secrets.SSL_EMAIL }}
+
+          echo "🔧 Instalando Nginx y Certbot"
+          sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx
+
+          echo "🔧 Configurando Nginx para Odoo + WebSocket"
+          sudo tee /etc/nginx/sites-available/odoo <<EOF
+          server {
+              listen 80;
+              server_name $DOMAIN;
+              return 301 https://\$host\$request_uri;
+          }
+
+          server {
+              listen 443 ssl;
+              server_name $DOMAIN;
+
+              ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+              ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+
+              location / {
+                  proxy_pass http://localhost:8069;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+              }
+
+              location /wss/ {
+                  proxy_pass http://localhost:8072;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade \$http_upgrade;
+                  proxy_set_header Connection "Upgrade";
+                  proxy_set_header Host \$host;
+              }
+          }
+          EOF
+
+          echo "🔧 Activando configuración de Nginx"
+          sudo ln -sf /etc/nginx/sites-available/odoo /etc/nginx/sites-enabled/odoo
+          sudo nginx -t && sudo systemctl reload nginx
+
+          echo "🔐 Solicitando certificado SSL con Certbot"
+          sudo certbot --nginx -d $DOMAIN --agree-tos --email $EMAIL --non-interactive --redirect
+        '
         script: |
           DOMAIN=${{ secrets.ODDO_DOMAIN }}
           EMAIL=${{ secrets.SSL_EMAIL }}
@@ -229,7 +277,6 @@ jobs:
           echo "🔐 Solicitando certificado SSL con Certbot"
           sudo certbot --nginx -d $DOMAIN --agree-tos --email $EMAIL --non-interactive --redirect
 
-    # esto lo saque  **************************************
     - name: 🔥 Create firewall rules
       run: |
         # Regla para Odoo (puerto 8069)
@@ -266,13 +313,13 @@ jobs:
           --target-tags=odoo-server \
           --description="Allow SSH access" || echo "SSH firewall rule already exists"
 
-          # Reglas para WebSocket (puertos 8765 y 8766)
-          gcloud compute firewall-rules create allow-websocket \
-            --project=${{ env.PROJECT_ID }} \
-            --direction=INGRESS \
-            --priority=1000 \
-            --network=default \
-            --action=ALLOW \
-            --rules=tcp:8765,tcp:8766 \
-            --source-ranges=0.0.0.0/0 \
-            --target-tags=odoo-server || echo "WebSocket firewall rule already exists"
+        # Reglas para WebSocket (puertos 8765 y 8766)
+        gcloud compute firewall-rules create allow-websocket \
+          --project=${{ env.PROJECT_ID }} \
+          --direction=INGRESS \
+          --priority=1000 \
+          --network=default \
+          --action=ALLOW \
+          --rules=tcp:8765,tcp:8766 \
+          --source-ranges=0.0.0.0/0 \
+          --target-tags=odoo-server || echo "WebSocket firewall rule already exists"
