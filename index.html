@@ -632,7 +632,7 @@
             
             // Intentar conexión WebSocket
             try {
-                websocket = new WebSocket(`ws://${ip}:8765`);
+                websocket = new WebSocket(`wss://${ip}:8765`);
                 
                 websocket.onopen = function(event) {
                     logStatus.className = 'log-status connected';
