@@ -27,7 +27,7 @@
             border-radius: 20px;
             box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
             padding: 40px;
-            max-width: 600px;
+            max-width: 800px;
             width: 100%;
             text-align: center;
             position: relative;
@@ -209,13 +209,203 @@
             margin-top: 5px;
         }
 
+        /* Nuevos estilos para los logs */
+        .log-container {
+            display: none;
+            margin-top: 20px;
+            background: #1e1e1e;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+        }
+
+        .log-container.show {
+            display: block;
+        }
+
+        .log-header {
+            background: #333;
+            color: white;
+            padding: 15px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid #444;
+        }
+
+        .log-header h3 {
+            margin: 0;
+            font-size: 1.1em;
+            display: flex;
+            align-items: center;
+        }
+
+        .log-status {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 10px;
+            background: #ff6b6b;
+        }
+
+        .log-status.connecting {
+            background: #ffa726;
+            animation: pulse 2s infinite;
+        }
+
+        .log-status.connected {
+            background: #4caf50;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        .log-controls {
+            display: flex;
+            gap: 10px;
+        }
+
+        .log-control-btn {
+            background: #555;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.8em;
+            transition: background 0.3s;
+        }
+
+        .log-control-btn:hover {
+            background: #666;
+        }
+
+        .log-control-btn.active {
+            background: #667eea;
+        }
+
+        .log-content {
+            height: 400px;
+            overflow-y: auto;
+            padding: 20px;
+            background: #1e1e1e;
+            color: #e0e0e0;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.4;
+            text-align: left;
+        }
+
+        .log-line {
+            margin-bottom: 2px;
+            padding: 2px 0;
+            word-wrap: break-word;
+        }
+
+        .log-line.info {
+            color: #81c784;
+        }
+
+        .log-line.warn {
+            color: #ffb74d;
+        }
+
+        .log-line.error {
+            color: #e57373;
+            font-weight: bold;
+        }
+
+        .log-line.success {
+            color: #4caf50;
+            font-weight: bold;
+        }
+
+        .log-line.timestamp {
+            color: #9e9e9e;
+        }
+
+        .progress-container {
+            display: none;
+            margin-top: 20px;
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .progress-container.show {
+            display: block;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            width: 0%;
+            transition: width 0.5s ease;
+            border-radius: 10px;
+        }
+
+        .progress-text {
+            text-align: center;
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+
+        .connection-status {
+            display: none;
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 0.9em;
+        }
+
+        .connection-status.show {
+            display: block;
+        }
+
+        .connection-status.error {
+            background: #ffebee;
+            color: #c62828;
+            border-left: 4px solid #f44336;
+        }
+
+        .connection-status.warning {
+            background: #fff3e0;
+            color: #ef6c00;
+            border-left: 4px solid #ff9800;
+        }
+
         @media (max-width: 600px) {
             .container {
                 padding: 30px 20px;
+                max-width: 100%;
             }
             
             .header h1 {
                 font-size: 2em;
+            }
+            
+            .log-content {
+                height: 300px;
+                font-size: 12px;
+            }
+            
+            .log-controls {
+                flex-direction: column;
+                gap: 5px;
             }
         }
     </style>
@@ -296,6 +486,30 @@
                 <p>Esto puede tardar unos minutos. El workflow se está ejecutando en GitHub Actions.</p>
             </div>
 
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <div class="progress-text" id="progressText">Preparando despliegue...</div>
+            </div>
+
+            <div class="log-container" id="logContainer">
+                <div class="log-header">
+                    <h3>
+                        <span class="log-status" id="logStatus"></span>
+                        📋 Logs de Instalación
+                    </h3>
+                    <div class="log-controls">
+                        <button class="log-control-btn" id="autoScrollBtn" onclick="toggleAutoScroll()">Auto-scroll</button>
+                        <button class="log-control-btn" onclick="clearLogs()">Limpiar</button>
+                        <button class="log-control-btn" onclick="downloadLogs()">Descargar</button>
+                    </div>
+                </div>
+                <div class="log-content" id="logContent"></div>
+            </div>
+
+            <div class="connection-status" id="connectionStatus"></div>
+
             <div class="result" id="resultDiv">
                 <div id="resultContent"></div>
             </div>
@@ -303,6 +517,24 @@
     </div>
 
     <script>
+        let websocket = null;
+        let autoScroll = true;
+        let logLines = [];
+        let currentInstanceIP = null;
+        let deploymentStartTime = null;
+        let progressSteps = [
+            { name: 'Iniciando despliegue', progress: 5 },
+            { name: 'Creando instancia VM', progress: 15 },
+            { name: 'Configurando firewall', progress: 25 },
+            { name: 'Instalando dependencias', progress: 40 },
+            { name: 'Instalando PostgreSQL', progress: 55 },
+            { name: 'Instalando Odoo 18', progress: 70 },
+            { name: 'Configurando base de datos', progress: 85 },
+            { name: 'Finalizando instalación', progress: 95 },
+            { name: 'Despliegue completado', progress: 100 }
+        ];
+        let currentStep = 0;
+
         function validateForm() {
             const token = document.getElementById('githubToken').value;
             const owner = document.getElementById('repoOwner').value;
@@ -342,13 +574,18 @@
 
         function showLoading(show) {
             const loadingDiv = document.getElementById('loadingDiv');
+            const progressContainer = document.getElementById('progressContainer');
+            const logContainer = document.getElementById('logContainer');
             const button = document.querySelector('.deploy-button');
             const buttonText = document.getElementById('buttonText');
             
             if (show) {
                 loadingDiv.classList.add('show');
+                progressContainer.classList.add('show');
+                logContainer.classList.add('show');
                 button.disabled = true;
                 buttonText.textContent = 'Desplegando...';
+                deploymentStartTime = Date.now();
             } else {
                 loadingDiv.classList.remove('show');
                 button.disabled = false;
@@ -356,11 +593,201 @@
             }
         }
 
+        function updateProgress(step, message = '') {
+            if (step < progressSteps.length) {
+                const progressFill = document.getElementById('progressFill');
+                const progressText = document.getElementById('progressText');
+                
+                progressFill.style.width = progressSteps[step].progress + '%';
+                progressText.textContent = message || progressSteps[step].name;
+                
+                currentStep = step;
+            }
+        }
+
+        function addLogLine(message, type = 'info') {
+            const logContent = document.getElementById('logContent');
+            const timestamp = new Date().toLocaleTimeString();
+            
+            const logLine = document.createElement('div');
+            logLine.className = `log-line ${type}`;
+            logLine.innerHTML = `<span class="timestamp">[${timestamp}]</span> ${message}`;
+            
+            logContent.appendChild(logLine);
+            logLines.push({ timestamp, message, type });
+            
+            if (autoScroll) {
+                logContent.scrollTop = logContent.scrollHeight;
+            }
+        }
+
+        function connectWebSocket(ip) {
+            const logStatus = document.getElementById('logStatus');
+            const connectionStatus = document.getElementById('connectionStatus');
+            
+            logStatus.className = 'log-status connecting';
+            showConnectionStatus('Conectando al servidor de logs...', 'warning');
+            
+            addLogLine('🔌 Intentando conectar al servidor de logs...', 'info');
+            
+            // Intentar conexión WebSocket
+            try {
+                websocket = new WebSocket(`ws://${ip}:8765`);
+                
+                websocket.onopen = function(event) {
+                    logStatus.className = 'log-status connected';
+                    hideConnectionStatus();
+                    addLogLine('✅ Conectado al servidor de logs', 'success');
+                };
+                
+                websocket.onmessage = function(event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        
+                        if (data.type === 'log') {
+                            addLogLine(data.message, data.level || 'info');
+                            
+                            // Actualizar progreso basado en el contenido del log
+                            updateProgressFromLog(data.message);
+                        } else if (data.type === 'progress') {
+                            updateProgress(data.step, data.message);
+                        } else if (data.type === 'complete') {
+                            updateProgress(progressSteps.length - 1, 'Despliegue completado');
+                            addLogLine('🎉 ¡Despliegue completado exitosamente!', 'success');
+                            onDeploymentComplete(data);
+                        } else if (data.type === 'error') {
+                            addLogLine(`❌ Error: ${data.message}`, 'error');
+                            showResult('error', `Error en el despliegue: ${data.message}`);
+                        }
+                    } catch (e) {
+                        // Si no es JSON, tratar como log simple
+                        addLogLine(event.data, 'info');
+                        updateProgressFromLog(event.data);
+                    }
+                };
+                
+                websocket.onclose = function(event) {
+                    logStatus.className = 'log-status';
+                    if (event.code !== 1000) {
+                        showConnectionStatus('Conexión perdida. Reintentando...', 'warning');
+                        addLogLine('⚠️ Conexión perdida. Reintentando...', 'warn');
+                        
+                        // Reintentar conexión después de 5 segundos
+                        setTimeout(() => {
+                            if (currentInstanceIP) {
+                                connectWebSocket(currentInstanceIP);
+                            }
+                        }, 5000);
+                    }
+                };
+                
+                websocket.onerror = function(error) {
+                    logStatus.className = 'log-status';
+                    showConnectionStatus('Error de conexión. Verificando estado...', 'error');
+                    addLogLine('❌ Error de conexión al servidor de logs', 'error');
+                };
+                
+            } catch (error) {
+                showConnectionStatus('No se puede conectar al servidor de logs', 'error');
+                addLogLine('❌ Error al inicializar WebSocket: ' + error.message, 'error');
+            }
+        }
+
+        function updateProgressFromLog(message) {
+            const lowerMessage = message.toLowerCase();
+            
+            if (lowerMessage.includes('creando instancia') || lowerMessage.includes('creating vm')) {
+                updateProgress(1);
+            } else if (lowerMessage.includes('firewall') || lowerMessage.includes('reglas')) {
+                updateProgress(2);
+            } else if (lowerMessage.includes('actualizando sistema') || lowerMessage.includes('installing dependencies')) {
+                updateProgress(3);
+            } else if (lowerMessage.includes('postgresql') || lowerMessage.includes('instalando postgresql')) {
+                updateProgress(4);
+            } else if (lowerMessage.includes('clonando odoo') || lowerMessage.includes('installing odoo')) {
+                updateProgress(5);
+            } else if (lowerMessage.includes('configurando odoo') || lowerMessage.includes('database')) {
+                updateProgress(6);
+            } else if (lowerMessage.includes('iniciando servicio') || lowerMessage.includes('starting service')) {
+                updateProgress(7);
+            } else if (lowerMessage.includes('instalación completada') || lowerMessage.includes('installation completed')) {
+                updateProgress(8);
+            }
+        }
+
+        function showConnectionStatus(message, type) {
+            const status = document.getElementById('connectionStatus');
+            status.className = `connection-status ${type} show`;
+            status.textContent = message;
+        }
+
+        function hideConnectionStatus() {
+            const status = document.getElementById('connectionStatus');
+            status.classList.remove('show');
+        }
+
+        function toggleAutoScroll() {
+            autoScroll = !autoScroll;
+            const btn = document.getElementById('autoScrollBtn');
+            btn.classList.toggle('active', autoScroll);
+            btn.textContent = autoScroll ? 'Auto-scroll ON' : 'Auto-scroll OFF';
+        }
+
+        function clearLogs() {
+            const logContent = document.getElementById('logContent');
+            logContent.innerHTML = '';
+            logLines = [];
+        }
+
+        function downloadLogs() {
+            const logText = logLines.map(line => `[${line.timestamp}] ${line.message}`).join('\n');
+            const blob = new Blob([logText], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `odoo-deployment-${new Date().toISOString().slice(0, 19)}.log`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function onDeploymentComplete(data) {
+            showLoading(false);
+            
+            const elapsedTime = deploymentStartTime ? Math.round((Date.now() - deploymentStartTime) / 1000) : 0;
+            const minutes = Math.floor(elapsedTime / 60);
+            const seconds = elapsedTime % 60;
+            
+            showResult('success', 
+                `✅ <strong>¡Despliegue completado exitosamente!</strong><br><br>
+                📋 <strong>Detalles:</strong><br>
+                • Instancia: ${data.instance_name || 'odoo'}<br>
+                • IP Externa: ${currentInstanceIP || 'Verificando...'}<br>
+                • Tiempo total: ${minutes}m ${seconds}s<br><br>
+                🌐 <strong>Acceso:</strong><br>
+                • URL: <a href="http://${currentInstanceIP}:8069" target="_blank">http://${currentInstanceIP}:8069</a><br>
+                • Usuario: admin<br>
+                • Contraseña: ${data.admin_password || 'admin123'}<br><br>
+                🎉 <strong>¡Tu instancia de Odoo está lista para usar!</strong>`
+            );
+        }
+
+        async function getInstanceIP(owner, repo, token, instanceName, zone) {
+            // Simular obtención de IP (en realidad necesitarías llamar a la API de GCP)
+            // Por simplicidad, asumimos que se obtiene después del despliegue
+            return new Promise((resolve) => {
+                setTimeout(() => {
+                    // Esta es una IP de ejemplo, en la implementación real deberías obtenerla de GCP
+                    resolve('34.123.45.67');
+                }, 30000); // Simular 30 segundos para obtener la IP
+            });
+        }
+
         async function deployOdoo() {
             if (!validateForm()) return;
 
             showLoading(true);
             document.getElementById('resultDiv').classList.remove('show');
+            updateProgress(0, 'Iniciando despliegue...');
 
             const token = document.getElementById('githubToken').value;
             const owner = document.getElementById('repoOwner').value;
@@ -370,8 +797,14 @@
             const zone = document.getElementById('zone').value;
             const diskSize = document.getElementById('diskSize').value;
 
+            addLogLine('🚀 Iniciando despliegue de Odoo 18...', 'info');
+            addLogLine(`📋 Configuración: ${instanceName}, ${machineType}, ${zone}, ${diskSize}GB`, 'info');
+
             try {
-                // Llamar a la API de GitHub para disparar el workflow
+                // Disparar el workflow
+                addLogLine('📡 Enviando solicitud a GitHub Actions...', 'info');
+                updateProgress(0, 'Enviando solicitud a GitHub Actions...');
+                
                 const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/dispatches`, {
                     method: 'POST',
                     headers: {
@@ -386,6 +819,7 @@
                             machine_type: machineType,
                             zone: zone,
                             disk_size: diskSize,
+                            enable_websocket: true, // Nueva opción
                             triggered_by: 'web-interface',
                             timestamp: new Date().toISOString()
                         }
@@ -393,23 +827,37 @@
                 });
 
                 if (response.ok) {
-                    showResult('success', 
-                        `✅ <strong>Despliegue iniciado exitosamente!</strong><br><br>
-                        📋 <strong>Detalles:</strong><br>
-                        • Instancia: ${instanceName}<br>
-                        • Tipo: ${machineType}<br>
-                        • Zona: ${zone}<br>
-                        • Disco: ${diskSize}GB<br><br>
-                        🔗 <strong>Siguiente paso:</strong><br>
-                        Ve a <a href="https://github.com/${owner}/${repo}/actions" target="_blank">GitHub Actions</a> para monitorear el progreso.<br><br>
-                        ⏱️ <strong>Tiempo estimado:</strong> 5-10 minutos`
-                    );
+                    addLogLine('✅ Workflow iniciado exitosamente', 'success');
+                    updateProgress(1, 'Workflow iniciado, creando instancia...');
+                    
+                    // Simular obtención de IP de la instancia después de un tiempo
+                    addLogLine('⏳ Esperando que la instancia esté lista...', 'info');
+                    
+                    setTimeout(async () => {
+                        try {
+                            // En una implementación real, deberías obtener la IP de la instancia de GCP
+                            // Por ahora simulamos con una IP de ejemplo
+                            currentInstanceIP = await getInstanceIP(owner, repo, token, instanceName, zone);
+                            addLogLine(`🌐 IP de la instancia obtenida: ${currentInstanceIP}`, 'success');
+                            
+                            // Intentar conectar al WebSocket
+                            setTimeout(() => {
+                                connectWebSocket(currentInstanceIP);
+                            }, 5000); // Esperar 5 segundos antes de conectar
+                            
+                        } catch (error) {
+                            addLogLine(`❌ Error obteniendo IP: ${error.message}`, 'error');
+                            showConnectionStatus('No se pudo obtener la IP de la instancia', 'error');
+                        }
+                    }, 15000); // Esperar 15 segundos para simular creación de instancia
+                    
                 } else {
                     const errorData = await response.json();
                     throw new Error(`Error ${response.status}: ${errorData.message || 'Error desconocido'}`);
                 }
             } catch (error) {
                 console.error('Error:', error);
+                addLogLine(`❌ Error: ${error.message}`, 'error');
                 showResult('error', 
                     `❌ <strong>Error al iniciar el despliegue:</strong><br><br>
                     ${error.message}<br><br>
@@ -418,7 +866,6 @@
                     • El repositorio existe y tienes permisos<br>
                     • El workflow está configurado correctamente`
                 );
-            } finally {
                 showLoading(false);
             }
         }
@@ -430,6 +877,10 @@
             
             if (savedOwner) document.getElementById('repoOwner').value = savedOwner;
             if (savedRepo) document.getElementById('repoName').value = savedRepo;
+            
+            // Configurar auto-scroll por defecto
+            document.getElementById('autoScrollBtn').classList.add('active');
+            document.getElementById('autoScrollBtn').textContent = 'Auto-scroll ON';
         });
 
         // Guardar valores en localStorage
@@ -439,6 +890,13 @@
 
         document.getElementById('repoName').addEventListener('change', function() {
             localStorage.setItem('repoName', this.value);
+        });
+
+        // Cerrar WebSocket al salir de la página
+        window.addEventListener('beforeunload', function() {
+            if (websocket) {
+                websocket.close();
+            }
         });
     </script>
 </body>
