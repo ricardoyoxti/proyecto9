@@ -50,175 +50,35 @@ info()    { send_websocket_log "$1" "info"; }
 warn()    { send_websocket_log "$1" "warn"; }
 success() { send_websocket_log "$1" "success"; }
 
-# Crear servidor WebSocket
+# Crear servidor WebSocket con soporte SSL
 create_websocket_server() {
     log "🔧 Configurando servidor WebSocket para logs en tiempo real..."
     
-    # Instalar dependencias de Python para WebSocket
+    # Instalar dependencias adicionales para SSL
     apt-get update -y
-    apt-get install -y python3 python3-pip
+    apt-get install -y python3 python3-pip openssl
     pip3 install websockets asyncio
+
+    # Crear certificado autofirmado para WebSocket SSL (solo para desarrollo)
+    mkdir -p /etc/websocket-ssl
+    openssl req -x509 -newkey rsa:4096 -keyout /etc/websocket-ssl/key.pem \
+        -out /etc/websocket-ssl/cert.pem -days 365 -nodes \
+        -subj "/C=US/ST=State/L=City/O=Org/CN=localhost"
     
-    # Crear servidor WebSocket
-    cat > /tmp/websocket_server.py << 'EOF'
+    # Servidor WebSocket con soporte SSL
+    cat > /tmp/websocket_server_ssl.py << 'EOF'
 #!/usr/bin/env python3
 import asyncio
 import websockets
-import json
-import sys
-import threading
-import queue
-import signal
+import ssl
 import os
-
-# Cola para mensajes
-message_queue = queue.Queue()
-connected_clients = set()
-
-async def handle_client(websocket, path):
-    """Manejar conexión de cliente WebSocket"""
-    connected_clients.add(websocket)
-    print(f"Cliente conectado desde {websocket.remote_address}")
-    
-    try:
-        await websocket.wait_closed()
-    except websockets.exceptions.ConnectionClosed:
-        pass
-    finally:
-        connected_clients.discard(websocket)
-        print(f"Cliente desconectado")
-
-async def broadcast_message(message):
-    """Enviar mensaje a todos los clientes conectados"""
-    if connected_clients:
-        # Crear lista de tareas para enviar a todos los clientes
-        tasks = []
-        for client in connected_clients.copy():
-            tasks.append(send_to_client(client, message))
-        
-        # Ejecutar todas las tareas
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-async def send_to_client(client, message):
-    """Enviar mensaje a un cliente específico"""
-    try:
-        await client.send(message)
-    except websockets.exceptions.ConnectionClosed:
-        connected_clients.discard(client)
-    except Exception as e:
-        print(f"Error enviando mensaje: {e}")
-        connected_clients.discard(client)
-
-def stdin_reader():
-    """Leer mensajes desde stdin en un hilo separado"""
-    while True:
-        try:
-            line = sys.stdin.readline()
-            if not line:
-                break
-            message_queue.put(line.strip())
-        except:
-            break
-
-async def message_processor():
-    """Procesar mensajes de la cola"""
-    while True:
-        try:
-            # Verificar si hay mensajes en la cola (no bloqueante)
-            try:
-                message = message_queue.get_nowait()
-                await broadcast_message(message)
-            except queue.Empty:
-                await asyncio.sleep(0.1)
-        except Exception as e:
-            print(f"Error procesando mensaje: {e}")
-            await asyncio.sleep(1)
-
-async def main():
-    """Función principal del servidor"""
-    print(f"Iniciando servidor WebSocket en puerto {sys.argv[1] if len(sys.argv) > 1 else 8765}")
-    
-    # Iniciar hilo para leer stdin
-    stdin_thread = threading.Thread(target=stdin_reader, daemon=True)
-    stdin_thread.start()
-    
-    # Iniciar servidor WebSocket
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
-    
-    # Crear tareas
-    server_task = websockets.serve(handle_client, "0.0.0.0", port)
-    message_task = message_processor()
-    
-    # Ejecutar servidor y procesador de mensajes
-    await asyncio.gather(server_task, message_task)
-
-def signal_handler(signum, frame):
-    """Manejar señales para cierre limpio"""
-    print("Cerrando servidor WebSocket...")
-    os._exit(0)
-
-if __name__ == "__main__":
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-    
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Servidor WebSocket cerrado")
-EOF
-
-    # Crear cliente WebSocket simple para enviar mensajes
-    cat > /tmp/websocket_client.py << 'EOF'
-#!/usr/bin/env python3
-import sys
-import socket
-import time
-
-def send_message():
-    """Enviar mensaje al servidor WebSocket local"""
-    try:
-        message = sys.stdin.read().strip()
-        if not message:
-            return
-            
-        # Crear socket TCP simple para enviar al servidor local
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)
-        
-        # En lugar de WebSocket completo, usar un método más simple
-        # Escribir a un archivo que el servidor puede leer
-        with open('/tmp/websocket_messages', 'a') as f:
-            f.write(message + '\n')
-            f.flush()
-            
-    except Exception as e:
-        # Fallar silenciosamente para no interrumpir el script principal
-        pass
-
-if __name__ == "__main__":
-    send_message()
-EOF
-
-    chmod +x /tmp/websocket_server.py
-    chmod +x /tmp/websocket_client.py
-    
-    # Crear versión simplificada que use archivos
-    cat > /tmp/websocket_simple_server.py << 'EOF'
-#!/usr/bin/env python3
-import asyncio
-import websockets
 import json
-import os
-import time
 
 connected_clients = set()
 
 async def handle_client(websocket, path):
-    """Manejar conexión de cliente WebSocket"""
     connected_clients.add(websocket)
     print(f"Cliente WebSocket conectado desde {websocket.remote_address}")
-    
     try:
         await websocket.wait_closed()
     except:
@@ -227,7 +87,6 @@ async def handle_client(websocket, path):
         connected_clients.discard(websocket)
 
 async def read_messages():
-    """Leer mensajes del archivo y enviarlos a clientes"""
     message_file = '/tmp/websocket_messages'
     last_position = 0
     
@@ -241,7 +100,6 @@ async def read_messages():
                         for line in new_lines:
                             line = line.strip()
                             if line and connected_clients:
-                                # Enviar a todos los clientes conectados
                                 disconnected = []
                                 for client in connected_clients:
                                     try:
@@ -249,7 +107,6 @@ async def read_messages():
                                     except:
                                         disconnected.append(client)
                                 
-                                # Remover clientes desconectados
                                 for client in disconnected:
                                     connected_clients.discard(client)
                         
@@ -262,15 +119,26 @@ async def read_messages():
             await asyncio.sleep(1)
 
 async def main():
-    port = int(os.environ.get('WEBSOCKET_PORT', '8765'))
-    print(f"Servidor WebSocket iniciado en puerto {port}")
-    
     # Limpiar archivo de mensajes
     open('/tmp/websocket_messages', 'w').close()
     
-    # Iniciar servidor y lector de mensajes
-    server = await websockets.serve(handle_client, "0.0.0.0", port)
-    await asyncio.gather(server.wait_closed(), read_messages())
+    # Configurar SSL para WSS
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain("/etc/websocket-ssl/cert.pem", "/etc/websocket-ssl/key.pem")
+    
+    # Servidor WSS en puerto 8766
+    print("Servidor WebSocket SSL iniciado en puerto 8766")
+    server_ssl = await websockets.serve(handle_client, "0.0.0.0", 8766, ssl=ssl_context)
+    
+    # Servidor WS normal en puerto 8765 para fallback
+    print("Servidor WebSocket iniciado en puerto 8765")  
+    server_normal = await websockets.serve(handle_client, "0.0.0.0", 8765)
+    
+    await asyncio.gather(
+        server_ssl.wait_closed(),
+        server_normal.wait_closed(),
+        read_messages()
+    )
 
 if __name__ == "__main__":
     try:
@@ -279,17 +147,15 @@ if __name__ == "__main__":
         print("Servidor cerrado")
 EOF
 
-    chmod +x /tmp/websocket_simple_server.py
+    chmod +x /tmp/websocket_server_ssl.py
     
-    # Iniciar servidor WebSocket en background
-    nohup python3 /tmp/websocket_simple_server.py > /var/log/websocket-server.log 2>&1 &
+    # Iniciar servidor con soporte SSL
+    nohup python3 /tmp/websocket_server_ssl.py > /var/log/websocket-server.log 2>&1 &
     WEBSOCKET_PID=$!
     echo $WEBSOCKET_PID > $WEBSOCKET_PID_FILE
     
-    # Esperar un poco para que el servidor inicie
     sleep 2
-    
-    success "✅ Servidor WebSocket iniciado (PID: $WEBSOCKET_PID)"
+    success "✅ Servidor WebSocket iniciado con SSL (PID: $WEBSOCKET_PID)"
 }
 
 # ➕ Obtener metadatos desde GCP con mejor manejo de errores
