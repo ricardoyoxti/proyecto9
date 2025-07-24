@@ -843,13 +843,13 @@
                             // Intentar conectar al WebSocket
                             setTimeout(() => {
                                 connectWebSocket(currentInstanceIP);
-                            }, 5000); // Esperar 5 segundos antes de conectar
+                            }, 30000); // Esperar 5 segundos antes de conectar
                             
                         } catch (error) {
                             addLogLine(`❌ Error obteniendo IP: ${error.message}`, 'error');
                             showConnectionStatus('No se pudo obtener la IP de la instancia', 'error');
                         }
-                    }, 15000); // Esperar 15 segundos para simular creación de instancia
+                    }, 600000); // Esperar 15 segundos para simular creación de instancia
                     
                 } else {
                     const errorData = await response.json();
