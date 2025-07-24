@@ -291,16 +291,6 @@ jobs:
     - name: 🔥 Create firewall rules
       run: |
         # Regla para Odoo (puerto 8069)
-        gcloud compute firewall-rules create allow-odoo-${{ github.run_number }} \
-          --project=${{ env.PROJECT_ID }} \
-          --direction=INGRESS \
-          --priority=1000 \
-          --network=default \
-          --action=ALLOW \
-          --rules=tcp:8069 \
-          --source-ranges=0.0.0.0/0 \
-          --target-tags=odoo-server \
-          --description="Allow Odoo access on port 8069" || \
         gcloud compute firewall-rules create allow-odoo \
           --project=${{ env.PROJECT_ID }} \
           --direction=INGRESS \
