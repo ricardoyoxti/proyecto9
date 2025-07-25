@@ -172,6 +172,434 @@ jobs:
           sleep 15
         done
 
+# Agregar este step ANTES de la configuración de Nginx en tu workflow YAML
+
+    - name: 🔌 Configurar Servidor WebSocket para Logs
+      run: |
+        INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          ZONE="${{ github.event.inputs.zone || 'southamerica-west1-a' }}"
+        else
+          ZONE="${{ github.event.client_payload.zone || 'southamerica-west1-a' }}"
+        fi
+
+        # Crear servidor WebSocket para logs en tiempo real
+        cat > websocket_server.py << 'WEBSOCKET_EOF'
+        #!/usr/bin/env python3
+        import asyncio
+        import websockets
+        import json
+        import subprocess
+        import threading
+        import logging
+        import time
+        from datetime import datetime
+        import os
+        import sys
+
+        # Configurar logging
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(__name__)
+
+        class LogStreamer:
+            def __init__(self):
+                self.clients = set()
+                self.log_buffer = []
+                self.deployment_status = "running"
+                
+            async def register_client(self, websocket):
+                self.clients.add(websocket)
+                logger.info(f"Cliente conectado. Total: {len(self.clients)}")
+                
+                # Enviar logs anteriores al nuevo cliente
+                for log_entry in self.log_buffer[-50:]:  # Últimos 50 logs
+                    try:
+                        await websocket.send(json.dumps(log_entry))
+                    except:
+                        break
+                        
+            async def unregister_client(self, websocket):
+                self.clients.discard(websocket)
+                logger.info(f"Cliente desconectado. Total: {len(self.clients)}")
+                
+            async def broadcast_log(self, message, log_type="info", step=None):
+                if not self.clients:
+                    return
+                    
+                log_entry = {
+                    "type": "log",
+                    "message": message,
+                    "level": log_type,
+                    "timestamp": datetime.now().isoformat(),
+                    "step": step
+                }
+                
+                # Agregar al buffer
+                self.log_buffer.append(log_entry)
+                if len(self.log_buffer) > 200:  # Mantener solo últimos 200 logs
+                    self.log_buffer.pop(0)
+                
+                # Enviar a todos los clientes conectados
+                disconnected = set()
+                for client in self.clients:
+                    try:
+                        await client.send(json.dumps(log_entry))
+                    except websockets.exceptions.ConnectionClosed:
+                        disconnected.add(client)
+                    except Exception as e:
+                        logger.error(f"Error enviando log: {e}")
+                        disconnected.add(client)
+                
+                # Remover clientes desconectados
+                self.clients -= disconnected
+                
+            async def broadcast_progress(self, step, message):
+                if not self.clients:
+                    return
+                    
+                progress_entry = {
+                    "type": "progress",
+                    "step": step,
+                    "message": message,
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                disconnected = set()
+                for client in self.clients:
+                    try:
+                        await client.send(json.dumps(progress_entry))
+                    except websockets.exceptions.ConnectionClosed:
+                        disconnected.add(client)
+                    except Exception as e:
+                        logger.error(f"Error enviando progreso: {e}")
+                        disconnected.add(client)
+                
+                self.clients -= disconnected
+                
+            async def broadcast_completion(self, success=True, data=None):
+                if not self.clients:
+                    return
+                    
+                completion_entry = {
+                    "type": "complete" if success else "error",
+                    "message": "Despliegue completado exitosamente" if success else "Error en el despliegue",
+                    "data": data or {},
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                disconnected = set()
+                for client in self.clients:
+                    try:
+                        await client.send(json.dumps(completion_entry))
+                    except websockets.exceptions.ConnectionClosed:
+                        disconnected.add(client)
+                    except Exception as e:
+                        logger.error(f"Error enviando completion: {e}")
+                        disconnected.add(client)
+                
+                self.clients -= disconnected
+
+        # Instancia global del streamer
+        log_streamer = LogStreamer()
+
+        async def handle_client(websocket, path):
+            await log_streamer.register_client(websocket)
+            try:
+                # Enviar mensaje de bienvenida
+                welcome = {
+                    "type": "log",
+                    "message": "🔌 Conectado al servidor de logs de Odoo",
+                    "level": "success",
+                    "timestamp": datetime.now().isoformat()
+                }
+                await websocket.send(json.dumps(welcome))
+                
+                # Mantener conexión activa
+                await websocket.wait_closed()
+            except websockets.exceptions.ConnectionClosed:
+                pass
+            except Exception as e:
+                logger.error(f"Error en conexión: {e}")
+            finally:
+                await log_streamer.unregister_client(websocket)
+
+        def run_command_with_streaming(command, step=None):
+            """Ejecutar comando y enviar output al WebSocket"""
+            try:
+                process = subprocess.Popen(
+                    command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    universal_newlines=True,
+                    bufsize=1
+                )
+                
+                for line in iter(process.stdout.readline, ''):
+                    if line.strip():
+                        # Determinar tipo de log basado en contenido
+                        log_type = "info"
+                        if any(word in line.lower() for word in ["error", "failed", "fatal"]):
+                            log_type = "error"
+                        elif any(word in line.lower() for word in ["warning", "warn"]):
+                            log_type = "warn"
+                        elif any(word in line.lower() for word in ["success", "completed", "done", "✅"]):
+                            log_type = "success"
+                        
+                        # Enviar log de forma asíncrona
+                        asyncio.run_coroutine_threadsafe(
+                            log_streamer.broadcast_log(line.strip(), log_type, step),
+                            loop
+                        )
+                
+                process.wait()
+                return process.returncode == 0
+                
+            except Exception as e:
+                asyncio.run_coroutine_threadsafe(
+                    log_streamer.broadcast_log(f"❌ Error ejecutando comando: {str(e)}", "error"),
+                    loop
+                )
+                return False
+
+        async def simulate_deployment():
+            """Simular proceso de despliegue con logs reales"""
+            await asyncio.sleep(2)  # Esperar conexiones iniciales
+            
+            steps = [
+                (0, "🚀 Iniciando despliegue de Odoo 18", "echo '🚀 Iniciando despliegue de Odoo 18'"),
+                (1, "📦 Actualizando sistema", "sudo apt update"),
+                (2, "🐘 Instalando PostgreSQL", "sudo apt install -y postgresql postgresql-contrib"),
+                (3, "🔧 Configurando PostgreSQL", "sudo systemctl enable postgresql && sudo systemctl start postgresql"),
+                (4, "📥 Descargando Odoo 18", "wget -q -O - https://nightly.odoo.com/odoo.key | sudo apt-key add -"),
+                (5, "🔧 Instalando Odoo", "echo 'Simulando instalación de Odoo...' && sleep 5"),
+                (6, "🗄️ Configurando base de datos", "echo 'Configurando base de datos Odoo...' && sleep 3"),
+                (7, "🚀 Iniciando servicios", "echo 'Iniciando servicios de Odoo...' && sleep 2"),
+                (8, "✅ Despliegue completado", "echo '✅ Odoo 18 instalado exitosamente'")
+            ]
+            
+            for step, message, command in steps:
+                await log_streamer.broadcast_progress(step, message)
+                await log_streamer.broadcast_log(f"📋 {message}", "info", step)
+                
+                # Ejecutar comando real o simulado
+                success = await asyncio.get_event_loop().run_in_executor(
+                    None, run_command_with_streaming, command, step
+                )
+                
+                if not success and step < 8:  # No fallar en el último paso
+                    await log_streamer.broadcast_log("❌ Error en el paso de instalación", "error")
+                    await log_streamer.broadcast_completion(False)
+                    return
+                
+                await asyncio.sleep(1)  # Pausa entre pasos
+            
+            # Completar despliegue
+            completion_data = {
+                "instance_name": "odoo-instance",
+                "admin_password": "admin123",
+                "ip_address": "IP_WILL_BE_SET",
+                "odoo_url": "http://IP_WILL_BE_SET:8069"
+            }
+            
+            await log_streamer.broadcast_completion(True, completion_data)
+
+        # Función principal
+        async def main():
+            global loop
+            loop = asyncio.get_event_loop()
+            
+            # Iniciar servidor WebSocket
+            logger.info("🔌 Iniciando servidor WebSocket en puerto 8765")
+            
+            # Iniciar simulación de despliegue en paralelo
+            deployment_task = asyncio.create_task(simulate_deployment())
+            
+            # Iniciar servidor WebSocket
+            server = await websockets.serve(handle_client, "0.0.0.0", 8765)
+            logger.info("🔌 Servidor WebSocket iniciado en ws://0.0.0.0:8765")
+            
+            # Mantener servidor corriendo
+            await server.wait_closed()
+
+        if __name__ == "__main__":
+            try:
+                asyncio.run(main())
+            except KeyboardInterrupt:
+                logger.info("🔌 Servidor WebSocket detenido")
+            except Exception as e:
+                logger.error(f"❌ Error en servidor WebSocket: {e}")
+        WEBSOCKET_EOF
+
+                # Crear script de instalación y inicio del servidor WebSocket
+                cat > setup_websocket.sh << 'SETUP_EOF'
+        #!/bin/bash
+
+        echo "🔌 Configurando servidor WebSocket para logs..."
+
+        # Instalar Python y dependencias
+        sudo apt update
+        sudo apt install -y python3 python3-pip
+
+        # Instalar websockets
+        pip3 install websockets
+
+        # Copiar servidor WebSocket
+        sudo cp /tmp/websocket_server.py /opt/websocket_server.py
+        sudo chmod +x /opt/websocket_server.py
+
+        # Crear servicio systemd para el servidor WebSocket
+        sudo tee /etc/systemd/system/odoo-websocket.service <<EOF
+        [Unit]
+        Description=Odoo WebSocket Log Server
+        After=network.target
+
+        [Service]
+        Type=simple
+        User=root
+        WorkingDirectory=/opt
+        ExecStart=/usr/bin/python3 /opt/websocket_server.py
+        Restart=always
+        RestartSec=5
+
+        [Install]
+        WantedBy=multi-user.target
+        EOF
+
+        # Habilitar e iniciar el servicio
+        sudo systemctl daemon-reload
+        sudo systemctl enable odoo-websocket
+        sudo systemctl start odoo-websocket
+
+        # Verificar estado
+        sudo systemctl status odoo-websocket --no-pager
+        echo "🔌 Servidor WebSocket configurado en puerto 8765"
+        SETUP_EOF
+
+                # Copiar archivos a la instancia
+                gcloud compute scp websocket_server.py $INSTANCE_NAME:/tmp/ --zone=$ZONE
+                gcloud compute scp setup_websocket.sh $INSTANCE_NAME:/tmp/ --zone=$ZONE
+                
+                # Ejecutar configuración
+                gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="chmod +x /tmp/setup_websocket.sh && /tmp/setup_websocket.sh"
+
+                # Configurar regla de firewall para WebSocket (puerto 8765)
+                echo "🔥 Configurando firewall para WebSocket..."
+                gcloud compute firewall-rules create allow-websocket-8765 \
+                  --allow tcp:8765 \
+                  --source-ranges 0.0.0.0/0 \
+                  --description "Allow WebSocket connections for Odoo logs" \
+                  --target-tags odoo-server 2>/dev/null || echo "Regla de firewall ya existe"
+
+    - name: ⚙️ Configurar Nginx + Certbot + WebSocket
+      run: |
+        # ... tu configuración actual de Nginx ...
+        # AGREGAR la configuración del proxy WebSocket
+        
+        INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          ZONE="${{ github.event.inputs.zone || 'southamerica-west1-a' }}"
+        else
+          ZONE="${{ github.event.client_payload.zone || 'southamerica-west1-a' }}"
+        fi
+        
+        # Crear configuración actualizada de Nginx con soporte WebSocket
+        cat > configure_nginx_with_ws.sh << 'SCRIPT_EOF'
+        
+        DOMAIN="${{ secrets.ODDO_DOMAIN }}"
+        EMAIL="${{ secrets.SSL_EMAIL }}"
+
+        echo "🔧 Instalando Nginx y Certbot"
+        sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx
+
+        echo "🔧 Configurando Nginx para Odoo + WebSocket + Logs"
+        sudo tee /etc/nginx/sites-available/odoo <<EOF
+        server {
+          listen 80;
+          server_name $DOMAIN;
+          return 301 https://\$host\$request_uri;
+        }
+
+        server {
+        listen 443 ssl;
+        server_name $DOMAIN;
+
+        ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+
+        # Odoo main application
+        location / {
+          proxy_pass http://localhost:8069;
+          proxy_set_header Host \$host;
+          proxy_set_header X-Real-IP \$remote_addr;
+          proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto \$scheme;
+        }
+
+        # Odoo WebSocket for chat/longpolling
+        location /wss/ {
+          proxy_pass http://localhost:8072;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade \$http_upgrade;
+          proxy_set_header Connection "Upgrade";
+          proxy_set_header Host \$host;
+        }
+
+        # WebSocket para logs de instalación
+        location /ws/ {
+          proxy_pass http://localhost:8765;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade \$http_upgrade;
+          proxy_set_header Connection "Upgrade";
+          proxy_set_header Host \$host;
+          proxy_set_header X-Real-IP \$remote_addr;
+          proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto \$scheme;
+        }
+        }
+        EOF
+
+        echo "🔧 Activando configuración de Nginx"
+        sudo ln -sf /etc/nginx/sites-available/odoo /etc/nginx/sites-enabled/odoo
+        sudo nginx -t && sudo systemctl reload nginx
+
+        echo "🔐 Solicitando certificado SSL con Certbot para dominio: $DOMAIN" 
+        if [ -n "$DOMAIN" ] && [ -n "$EMAIL" ]; then
+          sudo certbot --nginx -d "$DOMAIN" --agree-tos --email "$EMAIL" --non-interactive --redirect
+        else
+          echo "❌ Error: DOMAIN o EMAIL no están definidos"
+        fi
+        SCRIPT_EOF
+
+        # Ejecutar configuración
+        gcloud compute scp configure_nginx_with_ws.sh $INSTANCE_NAME:/tmp/ --zone=$ZONE
+        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="chmod +x /tmp/configure_nginx_with_ws.sh && /tmp/configure_nginx_with_ws.sh"
+
+    - name: 🌐 Obtener IP y configurar WebSocket
+      run: |
+        INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          ZONE="${{ github.event.inputs.zone || 'southamerica-west1-a' }}"
+        else
+          ZONE="${{ github.event.client_payload.zone || 'southamerica-west1-a' }}"
+        fi
+        
+        # Obtener IP externa
+        EXTERNAL_IP=$(gcloud compute instances describe $INSTANCE_NAME --zone=$ZONE --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+        echo "🌐 IP Externa de la instancia: $EXTERNAL_IP"
+        
+        # Actualizar el servidor WebSocket con la IP real
+        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="
+          sudo sed -i 's/IP_WILL_BE_SET/$EXTERNAL_IP/g' /opt/websocket_server.py
+          sudo systemctl restart odoo-websocket
+          echo '✅ Servidor WebSocket actualizado con IP: $EXTERNAL_IP'
+        "
+        
+        echo "🔌 WebSocket disponible en: wss://$EXTERNAL_IP:8765"
+        echo "🌐 Odoo disponible en: https://$EXTERNAL_IP:8069"
+
+
+
     - name: ⚙️ Configurar Nginx + Certbot + WebSocket
       run: |
         INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
@@ -190,7 +618,7 @@ jobs:
         echo "🔧 Instalando Nginx y Certbot"
         sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx
 
-        echo "🔧 Configurando Nginx para Odoo + WebSocket"
+        echo "🔧 Configurando Nginx para Odoo + WebSocket + Logs"
         sudo tee /etc/nginx/sites-available/odoo <<EOF
         server {
           listen 80;
@@ -205,37 +633,49 @@ jobs:
         ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
         ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
 
+        # Configuración SSL mejorada
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384;
+        ssl_prefer_server_ciphers off;
+
+        # Odoo main application
         location / {
           proxy_pass http://localhost:8069;
           proxy_set_header Host \$host;
           proxy_set_header X-Real-IP \$remote_addr;
           proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
           proxy_set_header X-Forwarded-Proto \$scheme;
+          proxy_redirect off;
         }
 
+        # Odoo WebSocket para chat/longpolling
         location /wss/ {
           proxy_pass http://localhost:8072;
           proxy_http_version 1.1;
           proxy_set_header Upgrade \$http_upgrade;
           proxy_set_header Connection "Upgrade";
           proxy_set_header Host \$host;
+          proxy_set_header X-Real-IP \$remote_addr;
+          proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto \$scheme;
+          proxy_cache_bypass \$http_upgrade;
+        }
+
+        # WebSocket para logs de instalación (NUEVO)
+        location /ws/ {
+          proxy_pass http://localhost:8765;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade \$http_upgrade;
+          proxy_set_header Connection "Upgrade";
+          proxy_set_header Host \$host;
+          proxy_set_header X-Real-IP \$remote_addr;
+          proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto \$scheme;
+          proxy_cache_bypass \$http_upgrade;
+          proxy_read_timeout 86400;
         }
         }
         EOF
-
-        echo "🔧 Activando configuración de Nginx"
-        sudo ln -sf /etc/nginx/sites-available/odoo /etc/nginx/sites-enabled/odoo
-        sudo nginx -t && sudo systemctl reload nginx
-
-        echo "🔐 Solicitando certificado SSL con Certbot para dominio: $DOMAIN" 
-        if [ -n "$DOMAIN" ] && [ -n "$EMAIL" ]; then
-          sudo certbot --nginx -d "$DOMAIN" --agree-tos --email "$EMAIL" --non-interactive --redirect
-        else
-          echo "❌ Error: DOMAIN o EMAIL no están definidos"
-          echo "DOMAIN: $DOMAIN"
-          echo "EMAIL: $EMAIL"
-        fi
-        SCRIPT_EOF
 
         # Copiar y ejecutar el script en la instancia
         gcloud compute scp configure_nginx.sh $INSTANCE_NAME:/tmp/ --zone=$ZONE
@@ -324,3 +764,40 @@ jobs:
           --rules=tcp:8765,tcp:8766 \
           --source-ranges=0.0.0.0/0 \
           --target-tags=odoo-server || echo "WebSocket firewall rule already exists"
+
+
+    - name: 🌐 Finalizar configuración WebSocket
+      run: |
+        INSTANCE_NAME="${{ steps.generate_name.outputs.INSTANCE_NAME }}"
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          ZONE="${{ github.event.inputs.zone || 'southamerica-west1-a' }}"
+        else
+          ZONE="${{ github.event.client_payload.zone || 'southamerica-west1-a' }}"
+        fi
+        
+        # Obtener IP externa
+        EXTERNAL_IP=$(gcloud compute instances describe $INSTANCE_NAME --zone=$ZONE --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+        echo "🌐 IP Externa de la instancia: $EXTERNAL_IP"
+        
+        # Actualizar servidor WebSocket con la IP real
+        gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --command="
+          sudo sed -i 's/IP_WILL_BE_SET/$EXTERNAL_IP/g' /opt/websocket_server.py
+          sudo systemctl restart odoo-websocket
+          
+          # Verificar que todo esté funcionando
+          echo '✅ Verificando servicios...'
+          sudo systemctl status nginx --no-pager -l | head -3
+          sudo systemctl status odoo-websocket --no-pager -l | head -3
+          
+          # Verificar puertos
+          echo '🔍 Puertos activos:'
+          sudo netstat -tlnp | grep -E ':(80|443|8069|8072|8765)'
+          
+          echo '✅ Configuración completada'
+          echo 'WebSocket disponible en: wss://$EXTERNAL_IP/ws/'
+          echo 'Odoo disponible en: https://$EXTERNAL_IP'
+        "
+        
+        echo "🎉 ¡Despliegue completado!"
+        echo "🔌 WebSocket: wss://$EXTERNAL_IP/ws/"
+        echo "🌐 Odoo: https://$EXTERNAL_IP"
