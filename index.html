@@ -674,8 +674,8 @@
                         
                         // Reintentar conexión después de 5 segundos
                         setTimeout(() => {
-                            if (currentInstanceIP) {
-                                connectWebSocket(currentInstanceIP);
+                            if (${ip}) {
+                                connectWebSocket(${ip});
                             }
                         }, 5000);
                     }
